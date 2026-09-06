@@ -1,0 +1,257 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<Page
+    x:Class="VoiceChanger.App.MainPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:local="using:VoiceChanger.App"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Spacing="24" Padding="36,24,36,36" MaxWidth="800" HorizontalAlignment="Left">
+
+            <!-- Header -->
+            <StackPanel Spacing="4">
+                <TextBlock Text="Phase 0: WASAPI Passthrough" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="SemiBold" />
+                <TextBlock Text="Real-time low-latency voice capture and routing via WASAPI shared mode event-driven streams."
+                           Style="{ThemeResource BodyTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+
+            <!-- Error InfoBar -->
+            <InfoBar x:Name="AlertInfoBar" IsOpen="False" Severity="Error" Title="Audio Notice" IsClosable="True" />
+
+            <!-- Device Selection Card -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="16">
+                    <TextBlock Text="Audio Endpoints" Style="{ThemeResource SubtitleTextBlockStyle}" />
+
+                    <!-- Input Device -->
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Microphone Input" FontWeight="Medium" />
+                        <ComboBox x:Name="InputDeviceCombo" HorizontalAlignment="Stretch" DisplayMemberPath="Name" />
+                    </StackPanel>
+
+                    <!-- Output Device -->
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Output Device (Select VB-CABLE or Headphones)" FontWeight="Medium" />
+                        <ComboBox x:Name="OutputDeviceCombo" HorizontalAlignment="Stretch" DisplayMemberPath="Name" />
+                    </StackPanel>
+
+                    <Button Content="Refresh Device List" Click="OnRefreshDevicesClicked" HorizontalAlignment="Left" />
+                </StackPanel>
+            </Border>
+
+            <!-- Control & Status Card -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="16">
+                    <TextBlock Text="Engine State" Style="{ThemeResource SubtitleTextBlockStyle}" />
+
+                    <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
+                        <Button x:Name="ToggleEngineButton"
+                                Content="Start Passthrough"
+                                Style="{ThemeResource AccentButtonStyle}"
+                                Width="160"
+                                Click="OnToggleEngineClicked" />
+
+                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <TextBlock Text="Status:" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="StatusText" Text="Stopped" FontWeight="SemiBold" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Phase 2: Phase Vocoder Pitch Shift Card -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="16">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="DSP Phase Vocoder Pitch Shift (Phase 2)" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="Real-time pitch shifting without changing speech tempo via STFT, instantaneous phase tracking, and Catmull-Rom cubic resampling."
+                                   Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <!-- Enable / Mode Switch -->
+                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Phase Vocoder DSP Tier" FontWeight="Medium" />
+                            <TextBlock Text="Enables real-time pitch transformation (zero heap allocations in audio loop)"
+                                       Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="VocoderToggle" Grid.Column="1"
+                                      OnContent="Active" OffContent="Bypassed"
+                                      IsOn="True"
+                                      Toggled="OnVocoderToggled" />
+                    </Grid>
+
+                    <!-- Pitch Shift Slider -->
+                    <StackPanel Spacing="8">
+                        <Grid>
+                            <TextBlock Text="Pitch Shift (Semitones)" FontWeight="Medium" HorizontalAlignment="Left" />
+                            <TextBlock x:Name="PitchValueText" Text="0.0 semitones (1.00x)"
+                                       FontWeight="SemiBold"
+                                       Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                       HorizontalAlignment="Right" />
+                        </Grid>
+                        <Slider x:Name="PitchSlider"
+                                Minimum="-12"
+                                Maximum="12"
+                                StepFrequency="0.5"
+                                TickFrequency="1"
+                                TickPlacement="Outside"
+                                Value="0"
+                                ValueChanged="OnPitchSliderValueChanged" />
+                    </StackPanel>
+
+                    <!-- Quick Presets -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Quick Presets" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Octave Down (-12)" Click="OnPresetClicked" Tag="-12" />
+                            <Button Content="Deep Voice (-5)" Click="OnPresetClicked" Tag="-5" />
+                            <Button Content="Natural (0)" Click="OnPresetClicked" Tag="0" />
+                            <Button Content="High Pitch (+5)" Click="OnPresetClicked" Tag="5" />
+                            <Button Content="Octave Up (+12)" Click="OnPresetClicked" Tag="12" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Phase 1: Ring Buffer & Clock Drift Diagnostics Card -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="16">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Ring Buffer &amp; Clock Drift Diagnostics (Phase 1)" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="Real-time SPSC ring fill levels, clock drift rate, and drop/duplicate compensation across independent device clocks."
+                                   Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <Grid ColumnSpacing="16" RowSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Render Buffer Fill -->
+                        <Border Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Render Ring Fill" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock x:Name="RenderFillText" Text="-- %" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="Bold" />
+                                <ProgressBar x:Name="RenderFillProgress" Value="0" Maximum="100" Margin="0,4,0,0" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Drift Rate -->
+                        <Border Grid.Column="1" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Clock Drift Rate" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock x:Name="DriftRateText" Text="0.0 /s" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="Bold" />
+                                <TextBlock Text="Samples / second" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Drift Corrections -->
+                        <Border Grid.Column="2" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Drift Corrections" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock x:Name="DriftCorrectionsText" Text="0 / 0" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="Bold" />
+                                <TextBlock Text="Drops / Duplicates" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Stream Integrity -->
+                        <Border Grid.Column="3" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Stream Glitches" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock x:Name="IntegrityText" Text="0 / 0" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="Bold" />
+                                <TextBlock Text="Overrun / Underrun" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Latency Distribution Card (Invariant #5) -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="16">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Round-Trip Latency Distribution (Invariant #5)" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="Reported as p50 / p95 / p99 / max distribution — never as a mean alone."
+                                   Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <Grid ColumnSpacing="16" RowSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- p50 -->
+                        <Border Grid.Column="0" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="p50 (Median)" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock x:Name="LatencyP50Text" Text="-- ms" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="Bold" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- p95 -->
+                        <Border Grid.Column="1" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="p95" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock x:Name="LatencyP95Text" Text="-- ms" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="Bold" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- p99 -->
+                        <Border Grid.Column="2" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="p99" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock x:Name="LatencyP99Text" Text="-- ms" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="Bold" />
+                            </StackPanel>
+                        </Border>
+
+                        <!-- max -->
+                        <Border Grid.Column="3" Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Max" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock x:Name="LatencyMaxText" Text="-- ms" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="Bold" />
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+
+                    <TextBlock x:Name="LatencyDetailsText" Text="Engine has not been started yet."
+                               Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                </StackPanel>
+            </Border>
+
+        </StackPanel>
+    </ScrollViewer>
+</Page>

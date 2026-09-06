@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "VoiceChanger (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "VoiceChanger (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}

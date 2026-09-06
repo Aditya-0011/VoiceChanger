@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="VoiceChanger.App/VoiceChanger.App.csproj" />
+  <Project Path="VoiceChanger.Audio/VoiceChanger.Audio.csproj" />
+  <Project Path="VoiceChanger.Bench/VoiceChanger.Bench.csproj" />
+  <Project Path="VoiceChanger.Core/VoiceChanger.Core.csproj" />
+  <Project Path="VoiceChanger.Neural/VoiceChanger.Neural.csproj" />
+  <Project Path="VoiceChanger.Tests/VoiceChanger.Tests.csproj" />
+</Solution>
