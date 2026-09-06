@@ -6,7 +6,7 @@
 [![WASAPI Audio](https://img.shields.io/badge/Audio-WASAPI%20Shared%20Mode-00A4EF?style=flat)](https://learn.microsoft.com/windows/win32/coreaudio/wasapi)
 [![Latency](https://img.shields.io/badge/Roundtrip%20Latency-51.3%20ms-success?style=flat)]()
 [![Zero Heap Allocations](https://img.shields.io/badge/Audio%20Loop%20GC-0%20bytes-brightgreen?style=flat)]()
-[![Tests](https://img.shields.io/badge/Tests-68%20Passed-brightgreen?style=flat)]()
+[![Tests](https://img.shields.io/badge/Tests-74%20Passed-brightgreen?style=flat)]()
 
 VoiceChanger shifts your voice pitch in real time on Windows 11 using .NET 10 and WinUI 3. It captures audio from your microphone, runs it through a phase vocoder, and sends the output to a virtual audio device like [VB-Audio Virtual Cable](https://vb-audio.com/Cable/). Discord, games, and web browsers can then use that virtual output as their recording input.
 

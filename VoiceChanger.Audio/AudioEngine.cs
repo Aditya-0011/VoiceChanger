@@ -74,6 +74,11 @@ public sealed class AudioEngine : IDisposable
     public LatencyDistribution? StartupLatency { get; private set; }
 
     /// <summary>
+    /// Gets the real runtime DSP processing latency distribution measured from live chunk execution.
+    /// </summary>
+    public LatencyDistribution? ProcessingLatency => _pipeline.GetProcessingLatencyDistribution();
+
+    /// <summary>
     /// Creates a new instance of <see cref="AudioEngine"/>.
     /// </summary>
     /// <param name="initialProcessor">Initial audio processor (defaults to PassthroughProcessor).</param>
@@ -234,31 +239,13 @@ public sealed class AudioEngine : IDisposable
         // Base hardware round-trip
         double baseRoundTripMs = captureMs + renderMs + algorithmicMs;
 
-        // Take 50 timestamp intervals to compute distribution variations
-        Span<double> samples = stackalloc double[50];
-        long startQpc = Stopwatch.GetTimestamp();
-
-        for (int i = 0; i < samples.Length; i++)
-        {
-            long sampleQpc = Stopwatch.GetTimestamp();
-            double jitterMs = ((sampleQpc - startQpc) % 100) / 1000.0; // slight timer granularity jitter
-            samples[i] = baseRoundTripMs + jitterMs;
-        }
-
-        samples.Sort();
-
-        double p50 = samples[25];
-        double p95 = samples[47];
-        double p99 = samples[49];
-        double max = samples[49];
-
         return new LatencyDistribution(
-            P50Ms: p50,
-            P95Ms: p95,
-            P99Ms: p99,
-            MaxMs: max,
-            SampleCount: samples.Length,
-            Configuration: $"Capture={captureMs:F1}ms, Render={renderMs:F1}ms, Algorithmic={algorithmicMs:F1}ms");
+            P50Ms: baseRoundTripMs,
+            P95Ms: baseRoundTripMs,
+            P99Ms: baseRoundTripMs,
+            MaxMs: baseRoundTripMs,
+            SampleCount: 1,
+            Configuration: $"Theoretical Budget (Capture={captureMs:F1}ms, Render={renderMs:F1}ms, Algorithmic={algorithmicMs:F1}ms)");
     }
 
     /// <inheritdoc/>

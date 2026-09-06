@@ -331,7 +331,10 @@ public sealed class WasapiRenderStream : IDisposable
             {
                 // Underflow: pad remainder with silence and record metric
                 outputSpan.Slice(read).Clear();
-                _pipeline.RecordUnderrun((int)framesNeeded - read);
+                if (_pipeline.IsStreamingActive)
+                {
+                    _pipeline.RecordUnderrun((int)framesNeeded - read);
+                }
             }
 
             uint flags = read == 0 ? WasapiConstants.AUDCLNT_BUFFERFLAGS_SILENT : 0;

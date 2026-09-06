@@ -205,6 +205,15 @@ public sealed partial class MainPage : Page
         var drift = _engine.DriftController;
         var pipeline = _engine.Pipeline;
 
+        if (_engine.ProcessingLatency is { } procLatency)
+        {
+            LatencyP50Text.Text = $"{procLatency.P50Ms:F2} ms";
+            LatencyP95Text.Text = $"{procLatency.P95Ms:F2} ms";
+            LatencyP99Text.Text = $"{procLatency.P99Ms:F2} ms";
+            LatencyMaxText.Text = $"{procLatency.MaxMs:F2} ms";
+            LatencyDetailsText.Text = $"{procLatency.Configuration} (Over {procLatency.SampleCount} chunks)";
+        }
+
         double fillPct = drift.FillPercentage;
         RenderFillText.Text = $"{fillPct:F1} % ({drift.FillMs:F0} ms)";
         RenderFillProgress.Value = Math.Clamp(fillPct, 0, 100);
@@ -216,6 +225,23 @@ public sealed partial class MainPage : Page
 
     private void ResetDiagnosticsUi()
     {
+        if (_engine.StartupLatency is { } startup)
+        {
+            LatencyP50Text.Text = $"{startup.P50Ms:F1} ms";
+            LatencyP95Text.Text = $"{startup.P95Ms:F1} ms";
+            LatencyP99Text.Text = $"{startup.P99Ms:F1} ms";
+            LatencyMaxText.Text = $"{startup.MaxMs:F1} ms";
+            LatencyDetailsText.Text = startup.Configuration;
+        }
+        else
+        {
+            LatencyP50Text.Text = "-- ms";
+            LatencyP95Text.Text = "-- ms";
+            LatencyP99Text.Text = "-- ms";
+            LatencyMaxText.Text = "-- ms";
+            LatencyDetailsText.Text = "Hardware latency not measured";
+        }
+
         RenderFillText.Text = "-- %";
         RenderFillProgress.Value = 0;
         DriftRateText.Text = "0.0 /s";

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using VoiceChanger.Audio.Drift;
 using VoiceChanger.Audio.Interop;
@@ -25,6 +27,12 @@ public sealed class ProcessingPipeline : IDisposable
     private volatile bool _isStopping;
     private bool _disposed;
     private IAudioProcessor _processor;
+
+    private const int LatencyHistoryCapacity = 128;
+    private readonly double[] _processDurationsMs = new double[LatencyHistoryCapacity];
+    private int _latencyHistoryCount;
+    private int _latencyHistoryIndex;
+    private readonly object _latencyLock = new();
 
     /// <summary>
     /// Ring buffer receiving raw audio from WASAPI capture stream.
@@ -84,21 +92,29 @@ public sealed class ProcessingPipeline : IDisposable
         _chunkSize = chunkSize;
         _captureRing = new SpscRingBuffer(ringCapacity);
         _renderRing = new SpscRingBuffer(ringCapacity);
+        _targetFrames = 1440;
         _driftController = new ClockDriftController(
             _renderRing,
             minIntervalBetweenCorrectionsMs: 0,
-            lowThresholdFrames: 720,             // 15 ms @ 48 kHz
-            highThresholdFrames: 2400,           // 50 ms @ 48 kHz
-            targetFrames: 1440,                  // 30 ms target @ 48 kHz
-            aggressiveHighThresholdFrames: 3360, // 70 ms @ 48 kHz
-            emergencyThresholdFrames: 4800);     // 100 ms @ 48 kHz
+            lowThresholdFrames: 720,              // 15 ms @ 48 kHz
+            highThresholdFrames: 2400,            // 50 ms @ 48 kHz
+            targetFrames: _targetFrames,          // 30 ms target @ 48 kHz
+            aggressiveHighThresholdFrames: 3360,  // 70 ms @ 48 kHz
+            emergencyThresholdFrames: 4800);      // 100 ms @ 48 kHz
 
-        _inputChunk = new float[chunkSize + 1]; // +1 for duplicate sample support
-        _outputChunk = new float[chunkSize + 1];
+        _inputChunk = new float[chunkSize + 2]; // +2 for up to 2 duplicate samples
+        _outputChunk = new float[chunkSize + 2];
         _dataAvailableEvent = new AutoResetEvent(false);
 
         _processor.Prepare(48000, chunkSize);
     }
+
+    private readonly int _targetFrames;
+
+    /// <summary>
+    /// Indicates whether active audio streaming has begun after initial hardware startup delays.
+    /// </summary>
+    public bool IsStreamingActive { get; private set; }
 
     /// <summary>
     /// Primes the render ring buffer with a nominal cushion of silence so the render stream
@@ -166,6 +182,7 @@ public sealed class ProcessingPipeline : IDisposable
         }
 
         _isStopping = false;
+        IsStreamingActive = false;
         Interlocked.Exchange(ref _overrunFramesRef, 0);
         Interlocked.Exchange(ref _underrunFramesRef, 0);
         OverrunFrames = 0;
@@ -233,6 +250,19 @@ public sealed class ProcessingPipeline : IDisposable
         Span<float> inputSpan = _inputChunk.AsSpan(0, _chunkSize);
         Span<float> outputSpan = _outputChunk.AsSpan(0, _chunkSize);
 
+        if (!IsStreamingActive && _captureRing.AvailableRead >= _chunkSize)
+        {
+            // When the first valid audio from the capture hardware arrives,
+            // ensure the render ring has the intended target cushion (1440 frames = 30 ms)
+            // in case hardware spin-up delays drained the initial pre-roll.
+            long currentFill = _renderRing.FillCount;
+            if (currentFill < _targetFrames)
+            {
+                PrimeRenderBuffer((int)(_targetFrames - currentFill));
+            }
+            IsStreamingActive = true;
+        }
+
         while (_captureRing.AvailableRead >= _chunkSize && !_isStopping)
         {
             // Evaluate clock drift correction
@@ -245,9 +275,13 @@ public sealed class ProcessingPipeline : IDisposable
                 break;
             }
 
-            // Execute active DSP processor
+            // Execute active DSP processor with Stopwatch timing instrumentation
             IAudioProcessor proc = Volatile.Read(ref _processor);
+            long t0 = Stopwatch.GetTimestamp();
             proc.Process(inputSpan, outputSpan);
+            long t1 = Stopwatch.GetTimestamp();
+            double elapsedMs = (double)(t1 - t0) * 1000.0 / Stopwatch.Frequency;
+            RecordProcessDuration(elapsedMs);
 
             // Handle clock drift correction:
             // +2 = Drop 2 samples (fast correction) -> write chunkSize - 2 frames
@@ -272,7 +306,18 @@ public sealed class ProcessingPipeline : IDisposable
                     RecordOverrun(toWrite.Length);
                 }
             }
-            else if (correction < 0)
+            else if (correction == -2)
+            {
+                // Duplicate 2 samples: append copies of last sample for aggressive low recovery
+                _outputChunk[_chunkSize] = _outputChunk[_chunkSize - 1];
+                _outputChunk[_chunkSize + 1] = _outputChunk[_chunkSize - 1];
+                ReadOnlySpan<float> toWrite = _outputChunk.AsSpan(0, _chunkSize + 2);
+                if (!_renderRing.Write(toWrite))
+                {
+                    RecordOverrun(toWrite.Length);
+                }
+            }
+            else if (correction == -1)
             {
                 // Duplicate 1 sample: append copy of last sample
                 _outputChunk[_chunkSize] = _outputChunk[_chunkSize - 1];
@@ -296,6 +341,54 @@ public sealed class ProcessingPipeline : IDisposable
         // Sync atomic overrun/underrun counters
         OverrunFrames = Volatile.Read(ref _overrunFramesRef);
         UnderrunFrames = Volatile.Read(ref _underrunFramesRef);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void RecordProcessDuration(double elapsedMs)
+    {
+        lock (_latencyLock)
+        {
+            _processDurationsMs[_latencyHistoryIndex] = elapsedMs;
+            _latencyHistoryIndex = (_latencyHistoryIndex + 1) % LatencyHistoryCapacity;
+            if (_latencyHistoryCount < LatencyHistoryCapacity)
+            {
+                _latencyHistoryCount++;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Computes the genuine latency distribution of DSP chunk execution from real measured runtime timestamps.
+    /// </summary>
+    public LatencyDistribution? GetProcessingLatencyDistribution()
+    {
+        Span<double> copy = stackalloc double[LatencyHistoryCapacity];
+        int count;
+
+        lock (_latencyLock)
+        {
+            count = _latencyHistoryCount;
+            if (count == 0)
+            {
+                return null;
+            }
+            _processDurationsMs.AsSpan(0, count).CopyTo(copy);
+        }
+
+        copy[..count].Sort();
+
+        double p50 = copy[(int)(count * 0.50)];
+        double p95 = copy[Math.Min(count - 1, (int)(count * 0.95))];
+        double p99 = copy[Math.Min(count - 1, (int)(count * 0.99))];
+        double max = copy[count - 1];
+
+        return new LatencyDistribution(
+            P50Ms: p50,
+            P95Ms: p95,
+            P99Ms: p99,
+            MaxMs: max,
+            SampleCount: count,
+            Configuration: $"Active DSP Execution ({_chunkSize} frames/chunk @ 48 kHz)");
     }
 
     /// <inheritdoc/>

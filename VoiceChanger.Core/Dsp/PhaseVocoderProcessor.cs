@@ -35,6 +35,11 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
     private int _maxBlockSize = 256;
     private bool _isPrepared;
 
+    private float[] _magnitude = [];
+    private float[] _analysisPhase = [];
+    private int[] _peakMap = [];
+    private bool _isPhaseInitialized;
+
     /// <summary>
     /// Gets or sets the pitch shift in semitones (typically -12.0 to +12.0).
     /// Can be updated dynamically on any thread without stopping or allocating.
@@ -77,7 +82,7 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
         _window = Window.CreateHann(frameSize, periodic: true);
         _resampler = new Resampler(capacity: 32768);
 
-        // Compute COLA normalization factor for analysis + synthesis Hann windows
+        // Calculate baseline COLA squared sum for verification
         float colaSum = Window.CalculateColaSquaredSum(_window, analysisHop);
         _colaNormalization = colaSum > 0f ? 1.0f / colaSum : 1.0f;
 
@@ -95,8 +100,12 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
 
         _real = new float[_frameSize];
         _imag = new float[_frameSize];
-        _prevPhase = new float[_frameSize / 2 + 1];
-        _synthPhase = new float[_frameSize / 2 + 1];
+        int numBins = _frameSize / 2 + 1;
+        _prevPhase = new float[numBins];
+        _synthPhase = new float[numBins];
+        _magnitude = new float[numBins];
+        _analysisPhase = new float[numBins];
+        _peakMap = new int[numBins];
 
         int overlapCap = 16384;
         _overlapBuffer = new float[overlapCap];
@@ -121,7 +130,7 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
         }
 
         int framesToProcess = Math.Min(input.Length, output.Length);
-        double ratio = _stretchRatio;
+        double pitchRatio = _stretchRatio; // 2^(semitones / 12)
 
         // Fast-path passthrough when pitch shift is negligible (< 0.01 semitones)
         if (Math.Abs(_pitchSemitones) < 0.01f)
@@ -140,21 +149,27 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
             _inputWritePos += toCopy;
             inputConsumed += toCopy;
 
-            // When a full frame is available, execute STFT -> Phase Vocoder -> ISTFT
+            // Stage 1: Phase Vocoder Time-Stretch by factor pitchRatio.
+            // Analysis hop (256 samples) synthesizes a stretched hop (256 * pitchRatio samples),
+            // expanding duration by factor pitchRatio while maintaining original fundamental frequencies.
             if (_inputWritePos >= _frameSize)
             {
-                ProcessStftFrame(ratio);
+                ProcessStftFrame(pitchRatio);
 
                 // Shift analysis FIFO by 1 hop
                 Array.Copy(_inputBuffer, _analysisHop, _inputBuffer, 0, _frameSize - _analysisHop);
                 _inputWritePos = _frameSize - _analysisHop;
             }
 
-            // Resample synthesis frames into output destination
+            // Stage 2: Resampler Decimation / Speedup by factor pitchRatio (duration factor = 1 / pitchRatio).
+            // Reads from the time-stretched intermediate buffer with playback speed = pitchRatio.
+            // This compresses the duration by 1 / pitchRatio (restoring original speech rate:
+            // duration * pitchRatio / pitchRatio = 1.0) and shifts all frequencies up by pitchRatio.
             if (outputProduced < framesToProcess)
             {
                 int needed = framesToProcess - outputProduced;
-                int read = _resampler.Read(output.Slice(outputProduced, needed), ratio);
+                double playbackSpeed = pitchRatio;
+                int read = _resampler.Read(output.Slice(outputProduced, needed), playbackSpeed);
                 outputProduced += read;
             }
         }
@@ -179,7 +194,7 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
         // 2. Forward FFT
         _fft.Forward(_real, _imag);
 
-        // 3. Phase unwrapping, instantaneous frequency analysis, and synthesis phase advance
+        // 3. Extract magnitude and phase
         int halfSize = _frameSize / 2;
         float synthesisHop = (float)(_analysisHop * ratio);
         double twoPi = 2.0 * Math.PI;
@@ -189,69 +204,155 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
         {
             float r = _real[k];
             float im = _imag[k];
-            float magnitude = MathF.Sqrt(r * r + im * im);
-            float phase = MathF.Atan2(im, r);
+            _magnitude[k] = MathF.Sqrt(r * r + im * im);
+            _analysisPhase[k] = MathF.Atan2(im, r);
+        }
 
-            // Phase deviation from expected bin center frequency
-            float expectedPhaseDiff = (float)(k * binFreqStep * _analysisHop);
-            float phaseDiff = phase - _prevPhase[k];
-            _prevPhase[k] = phase;
+        if (!_isPhaseInitialized)
+        {
+            for (int k = 0; k <= halfSize; k++)
+            {
+                _synthPhase[k] = _analysisPhase[k];
+                // Seed prevPhase assuming nominal center bin frequency progression
+                _prevPhase[k] = _analysisPhase[k] - (float)(k * binFreqStep * _analysisHop);
+            }
+            _isPhaseInitialized = true;
+        }
 
-            float phaseDeviation = phaseDiff - expectedPhaseDiff;
+        // 4. Find spectral peaks (local maxima) and assign region of influence
+        int currentPeak = 0;
+        for (int k = 0; k <= halfSize; k++)
+        {
+            bool isPeak;
+            if (k == 0)
+            {
+                isPeak = _magnitude[0] > _magnitude[1];
+            }
+            else if (k == halfSize)
+            {
+                isPeak = _magnitude[halfSize] > _magnitude[halfSize - 1];
+            }
+            else
+            {
+                isPeak = _magnitude[k] > _magnitude[k - 1] && _magnitude[k] >= _magnitude[k + 1];
+            }
 
-            // Principle argument wrapping to (-pi, pi]
-            float d = (float)(phaseDeviation / twoPi);
-            phaseDeviation -= (float)(Math.Round(d) * twoPi);
+            if (isPeak)
+            {
+                currentPeak = k;
+            }
+            _peakMap[k] = currentPeak;
+        }
 
-            // True instantaneous frequency
-            float instFreq = (float)(k * binFreqStep) + (phaseDeviation / _analysisHop);
+        // Backward pass: assign bins to the closer peak in frequency
+        int nextPeak = halfSize;
+        for (int k = halfSize; k >= 0; k--)
+        {
+            bool isPeak;
+            if (k == 0)
+            {
+                isPeak = _magnitude[0] > _magnitude[1];
+            }
+            else if (k == halfSize)
+            {
+                isPeak = _magnitude[halfSize] > _magnitude[halfSize - 1];
+            }
+            else
+            {
+                isPeak = _magnitude[k] > _magnitude[k - 1] && _magnitude[k] >= _magnitude[k + 1];
+            }
 
-            // Advance synthesis phase by stretched synthesis hop
-            float newSynthPhase = _synthPhase[k] + (instFreq * synthesisHop);
-            float dSynth = (float)(newSynthPhase / twoPi);
-            _synthPhase[k] = newSynthPhase - (float)(Math.Round(dSynth) * twoPi);
+            if (isPeak)
+            {
+                nextPeak = k;
+            }
 
-            // Synthesize spectral bin
-            _real[k] = magnitude * MathF.Cos(_synthPhase[k]);
-            _imag[k] = magnitude * MathF.Sin(_synthPhase[k]);
+            int prevP = _peakMap[k];
+            if (Math.Abs(k - nextPeak) < Math.Abs(k - prevP))
+            {
+                _peakMap[k] = nextPeak;
+            }
+        }
 
-            // Hermitian symmetry for real inverse FFT
+        // 5. Advance synthesis phase for peak bins
+        for (int k = 0; k <= halfSize; k++)
+        {
+            if (_peakMap[k] == k)
+            {
+                float expectedPhaseDiff = (float)(k * binFreqStep * _analysisHop);
+                float phaseDiff = _analysisPhase[k] - _prevPhase[k];
+                float phaseDeviation = phaseDiff - expectedPhaseDiff;
+
+                // Principle argument wrapping to (-pi, pi]
+                float d = (float)(phaseDeviation / twoPi);
+                phaseDeviation -= (float)(Math.Round(d) * twoPi);
+
+                // True instantaneous frequency
+                float instFreq = (float)(k * binFreqStep) + (phaseDeviation / _analysisHop);
+
+                // Advance synthesis phase by stretched synthesis hop
+                float newPeakPhase = _synthPhase[k] + (instFreq * synthesisHop);
+                float dSynth = (float)(newPeakPhase / twoPi);
+                _synthPhase[k] = newPeakPhase - (float)(Math.Round(dSynth) * twoPi);
+            }
+        }
+
+        // 6. Identity Phase Locking: lock non-peak bins to their assigned peak
+        for (int k = 0; k <= halfSize; k++)
+        {
+            int p = _peakMap[k];
+            if (p != k)
+            {
+                float phaseOffset = _analysisPhase[k] - _analysisPhase[p];
+                _synthPhase[k] = _synthPhase[p] + phaseOffset;
+            }
+            _prevPhase[k] = _analysisPhase[k];
+        }
+
+        // 7. Synthesize spectral bins with Hermitian symmetry
+        for (int k = 0; k <= halfSize; k++)
+        {
+            float mag = _magnitude[k];
+            _real[k] = mag * MathF.Cos(_synthPhase[k]);
+            _imag[k] = mag * MathF.Sin(_synthPhase[k]);
+
             if (k > 0 && k < halfSize)
             {
                 _real[_frameSize - k] = _real[k];
                 _imag[_frameSize - k] = -_imag[k];
             }
         }
-
-        // Nyquist bin imaginary component must be 0
+        _imag[0] = 0f;
         _imag[halfSize] = 0f;
 
-        // 4. Inverse FFT
+        // 8. Inverse FFT
         _fft.Inverse(_real, _imag);
 
-        // 5. Apply synthesis window with COLA normalization and overlap-add
+        // 9. Overlap-add with exact analytical COLA normalization
+        // For a periodic Hann window of length N with hop H:
+        // sum(w^2) = (3/8) * (N / H) = (0.375 * N) / H.
+        // Therefore colaNorm = H / (0.375 * N) = H / 384 for N = 1024.
+        int hopSamples = Math.Max(1, (int)Math.Round(synthesisHop));
+        float colaNorm = hopSamples / (0.375f * _frameSize);
+
         for (int n = 0; n < _frameSize; n++)
         {
             long writeIdx = (_overlapWritePos + n) & _overlapMask;
-            _overlapBuffer[writeIdx] += _real[n] * _window[n] * _colaNormalization;
+            _overlapBuffer[writeIdx] += _real[n] * _window[n] * colaNorm;
         }
 
-        // 6. Push synthesis hop of samples to resampler
-        int hopSamples = (int)Math.Round(synthesisHop);
-        if (hopSamples > 0)
+        // 10. Push synthesis hop of samples to resampler
+        for (int i = 0; i < hopSamples; i++)
         {
-            for (int i = 0; i < hopSamples; i++)
-            {
-                long readIdx = (_overlapReadPos + i) & _overlapMask;
-                _intermediateChunk[i] = _overlapBuffer[readIdx];
-                _overlapBuffer[readIdx] = 0f; // Clear for future overlap-adds
-            }
-
-            _overlapReadPos += hopSamples;
-            _overlapWritePos += hopSamples;
-
-            _resampler.Write(_intermediateChunk.AsSpan(0, hopSamples));
+            long readIdx = (_overlapReadPos + i) & _overlapMask;
+            _intermediateChunk[i] = _overlapBuffer[readIdx];
+            _overlapBuffer[readIdx] = 0f; // Clear for future overlap-adds
         }
+
+        _overlapReadPos += hopSamples;
+        _overlapWritePos += hopSamples;
+
+        _resampler.Write(_intermediateChunk.AsSpan(0, hopSamples));
     }
 
     /// <inheritdoc/>
@@ -260,12 +361,16 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
         _inputWritePos = 0;
         _overlapReadPos = 0;
         _overlapWritePos = 0;
+        _isPhaseInitialized = false;
 
         Array.Clear(_inputBuffer);
         Array.Clear(_real);
         Array.Clear(_imag);
         Array.Clear(_prevPhase);
         Array.Clear(_synthPhase);
+        Array.Clear(_magnitude);
+        Array.Clear(_analysisPhase);
+        Array.Clear(_peakMap);
         Array.Clear(_overlapBuffer);
         _resampler.Reset();
 

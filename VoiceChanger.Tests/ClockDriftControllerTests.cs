@@ -69,4 +69,28 @@ public sealed class ClockDriftControllerTests
         Assert.Equal(0, second);
         Assert.Equal(1, controller.DroppedSampleCount);
     }
+
+    [Fact]
+    public void LinearRegression_CalculatesExactDriftSlope()
+    {
+        var ring = new SpscRingBuffer(1024);
+        var controller = new ClockDriftController(ring);
+
+        // Feed synthetic linear slope of +10 samples/sec
+        controller.AddObservation(0.0, 500);
+        controller.AddObservation(0.5, 505);
+        controller.AddObservation(1.0, 510);
+        controller.AddObservation(1.5, 515);
+        controller.AddObservation(2.0, 520);
+
+        Assert.Equal(10.0, controller.DriftRateSamplesPerSec, precision: 2);
+
+        // Test reset and negative slope of -5.0 samples/sec
+        controller.Reset();
+        controller.AddObservation(0.0, 500);
+        controller.AddObservation(1.0, 495);
+        controller.AddObservation(2.0, 490);
+
+        Assert.Equal(-5.0, controller.DriftRateSamplesPerSec, precision: 2);
+    }
 }

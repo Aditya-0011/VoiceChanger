@@ -17,12 +17,28 @@ public sealed class ClockDriftController
     private readonly int _emergencyThresholdFrames;
     private readonly long _minIntervalBetweenCorrectionsTicks;
 
+    private readonly struct DriftObservation(double timeSec, long fillSamples)
+    {
+        public readonly double TimeSec = timeSec;
+        public readonly long FillSamples = fillSamples;
+    }
+
+    private const int HistoryCapacity = 64;
+    private readonly DriftObservation[] _history = new DriftObservation[HistoryCapacity];
+    private int _historyCount;
+    private int _historyWriteIndex;
+    private long _baseTimestamp;
+
     private long _lastCorrectionTimestamp;
     private long _lastSampleTimestamp;
-    private long _lastFillCount;
+    private long _fillAccumulator;
+    private int _fillSampleCount;
+    private bool _inLowRecovery;
+    private bool _inHighRecovery;
 
     /// <summary>
-    /// Current estimated drift velocity in samples per second (positive = buffer filling, negative = buffer draining).
+    /// Current estimated drift velocity in samples per second (positive = buffer filling, negative = buffer draining),
+    /// calculated via Ordinary Least Squares (OLS) linear regression over the recent sample history.
     /// </summary>
     public double DriftRateSamplesPerSec { get; private set; }
 
@@ -97,32 +113,88 @@ public sealed class ClockDriftController
     }
 
     /// <summary>
-    /// Updates drift velocity instrumentation. Safe to call periodically from monitoring or worker threads.
+    /// Updates drift velocity instrumentation using Ordinary Least Squares linear regression.
+    /// Integrates the mean fill over each observation window to filter out intra-period WASAPI batching ripple.
+    /// Safe to call periodically from monitoring or worker threads.
     /// </summary>
     public void UpdateInstrumentation()
     {
         long now = Stopwatch.GetTimestamp();
         long currentFill = _ringBuffer.FillCount;
+        _fillAccumulator += currentFill;
+        _fillSampleCount++;
 
-        if (_lastSampleTimestamp == 0)
+        if (_baseTimestamp == 0)
         {
+            _baseTimestamp = now;
             _lastSampleTimestamp = now;
-            _lastFillCount = currentFill;
+            _history[0] = new DriftObservation(0.0, currentFill);
+            _historyCount = 1;
+            _historyWriteIndex = 1;
+            _fillAccumulator = 0;
+            _fillSampleCount = 0;
             return;
         }
 
         long elapsedTicks = now - _lastSampleTimestamp;
-        if (elapsedTicks >= Stopwatch.Frequency / 2) // Update every >= 500 ms
+        if (elapsedTicks >= Stopwatch.Frequency / 10) // Sample at >= 100 ms intervals
         {
-            double elapsedSeconds = (double)elapsedTicks / Stopwatch.Frequency;
-            long deltaSamples = currentFill - _lastFillCount;
-
-            // Exponential moving average for smooth drift rate reporting
-            double instantRate = deltaSamples / elapsedSeconds;
-            DriftRateSamplesPerSec = (DriftRateSamplesPerSec * 0.8) + (instantRate * 0.2);
-
             _lastSampleTimestamp = now;
-            _lastFillCount = currentFill;
+            double t = (double)(now - _baseTimestamp) / Stopwatch.Frequency;
+            long avgFill = _fillSampleCount > 0 ? (long)Math.Round((double)_fillAccumulator / _fillSampleCount) : currentFill;
+            _fillAccumulator = 0;
+            _fillSampleCount = 0;
+            AddObservation(t, avgFill);
+        }
+    }
+
+    /// <summary>
+    /// Records an observation and recomputes the linear regression slope.
+    /// </summary>
+    internal void AddObservation(double timeSec, long fillSamples)
+    {
+        _history[_historyWriteIndex] = new DriftObservation(timeSec, fillSamples);
+        _historyWriteIndex = (_historyWriteIndex + 1) % HistoryCapacity;
+        if (_historyCount < HistoryCapacity)
+        {
+            _historyCount++;
+        }
+
+        ComputeLinearRegression();
+    }
+
+    private void ComputeLinearRegression()
+    {
+        if (_historyCount < 2)
+        {
+            return;
+        }
+
+        double sumT = 0.0;
+        double sumY = 0.0;
+        for (int i = 0; i < _historyCount; i++)
+        {
+            sumT += _history[i].TimeSec;
+            sumY += _history[i].FillSamples;
+        }
+
+        double meanT = sumT / _historyCount;
+        double meanY = sumY / _historyCount;
+
+        double numerator = 0.0;
+        double denominator = 0.0;
+
+        for (int i = 0; i < _historyCount; i++)
+        {
+            double dt = _history[i].TimeSec - meanT;
+            double dy = _history[i].FillSamples - meanY;
+            numerator += dt * dy;
+            denominator += dt * dt;
+        }
+
+        if (denominator > 1e-9)
+        {
+            DriftRateSamplesPerSec = numerator / denominator;
         }
     }
 
@@ -159,6 +231,8 @@ public sealed class ClockDriftController
                 int discarded = _ringBuffer.Discard(toDiscard);
                 DroppedSampleCount += discarded;
                 _lastCorrectionTimestamp = now;
+                _inHighRecovery = false;
+                _inLowRecovery = false;
                 return 0;
             }
         }
@@ -166,23 +240,51 @@ public sealed class ClockDriftController
         // Tier 2 high: aggressive drop (2 samples per chunk)
         if (_aggressiveHighThresholdFrames > 0 && fill > _aggressiveHighThresholdFrames)
         {
+            _inHighRecovery = true;
             _lastCorrectionTimestamp = now;
             DroppedSampleCount += 2;
             return 2;
         }
 
-        // Tier 1 high: standard drop (1 sample per chunk)
+        // Check high threshold with hysteresis toward target
         if (fill > _highThresholdFrames)
+        {
+            _inHighRecovery = true;
+        }
+        else if (fill <= _targetFrames)
+        {
+            _inHighRecovery = false;
+        }
+
+        if (_inHighRecovery)
         {
             _lastCorrectionTimestamp = now;
             DroppedSampleCount++;
             return 1;
         }
 
-        // Low threshold: duplicate (1 sample per chunk)
-        if (fill < _lowThresholdFrames && fill > 0)
+        // Check low threshold with hysteresis toward target
+        if (fill < _lowThresholdFrames)
+        {
+            _inLowRecovery = true;
+        }
+        else if (fill >= _targetFrames)
+        {
+            _inLowRecovery = false;
+        }
+
+        if (_inLowRecovery)
         {
             _lastCorrectionTimestamp = now;
+
+            // Tier 2 low: if critically low (< half of low threshold), duplicate 2 samples to prevent underrun
+            if (fill < _lowThresholdFrames / 2)
+            {
+                DuplicatedSampleCount += 2;
+                return -2;
+            }
+
+            // Tier 1 low: duplicate 1 sample per chunk
             DuplicatedSampleCount++;
             return -1;
         }
@@ -197,7 +299,13 @@ public sealed class ClockDriftController
     {
         _lastCorrectionTimestamp = 0;
         _lastSampleTimestamp = 0;
-        _lastFillCount = 0;
+        _baseTimestamp = 0;
+        _historyCount = 0;
+        _historyWriteIndex = 0;
+        _fillAccumulator = 0;
+        _fillSampleCount = 0;
+        _inLowRecovery = false;
+        _inHighRecovery = false;
         DriftRateSamplesPerSec = 0.0;
         DroppedSampleCount = 0;
         DuplicatedSampleCount = 0;

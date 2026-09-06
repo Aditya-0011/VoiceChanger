@@ -135,6 +135,50 @@ public sealed class PhaseVocoderTests
         Assert.Equal(0, allocatedDelta);
     }
 
+    [Theory]
+    [InlineData(-12.0f)]
+    [InlineData(-6.0f)]
+    [InlineData(0.0f)]
+    [InlineData(6.0f)]
+    [InlineData(12.0f)]
+    public void ColaCondition_FlatAmplitudeEnvelopeAcrossPitchRatios(float semitones)
+    {
+        var vocoder = new PhaseVocoderProcessor(frameSize: 1024, analysisHop: 256, initialSemitones: semitones);
+        vocoder.Prepare(SampleRate, BlockSize);
+
+        float[] input = new float[BlockSize];
+        float[] output = new float[BlockSize];
+
+        double sumSteadyRms = 0;
+        int steadyCount = 0;
+
+        for (int i = 0; i < 100; i++)
+        {
+            for (int s = 0; s < BlockSize; s++)
+            {
+                input[s] = MathF.Sin(2.0f * MathF.PI * 440f * (i * BlockSize + s) / SampleRate);
+            }
+            vocoder.Process(input, output);
+
+            // Skip initial 15 blocks (settling / latency)
+            if (i >= 15)
+            {
+                double blockRms = 0.0;
+                for (int s = 0; s < output.Length; s++) blockRms += output[s] * output[s];
+                blockRms = Math.Sqrt(blockRms / output.Length);
+
+                // Individual block RMS must be within flat envelope bounds
+                Assert.InRange(blockRms, 0.7071 * 0.85, 0.7071 * 1.15);
+                sumSteadyRms += blockRms;
+                steadyCount++;
+            }
+        }
+
+        double meanSteadyRms = sumSteadyRms / steadyCount;
+        // Overall steady-state RMS must be within 10% of theoretical sine RMS (0.7071)
+        Assert.InRange(meanSteadyRms, 0.7071 * 0.90, 0.7071 * 1.10);
+    }
+
     private static float MeasureProcessedToneFrequency(PhaseVocoderProcessor vocoder, float inputFreq, float durationSec)
     {
         int totalFrames = (int)(SampleRate * durationSec);
