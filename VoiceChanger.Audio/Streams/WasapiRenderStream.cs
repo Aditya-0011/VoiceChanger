@@ -13,6 +13,8 @@ public sealed class WasapiRenderStream : IDisposable
 {
     private readonly string? _deviceId;
     private readonly ProcessingPipeline _pipeline;
+    private readonly Core.Buffers.SpscRingBuffer _sourceRing;
+    private readonly bool _isMonitoringTap;
     private Thread? _thread;
     private nint _hEvent;
     private volatile bool _isStopping;
@@ -42,10 +44,18 @@ public sealed class WasapiRenderStream : IDisposable
     /// </summary>
     /// <param name="deviceId">Target render device ID, or null for default multimedia output.</param>
     /// <param name="pipeline">Processing pipeline providing audio samples.</param>
-    public WasapiRenderStream(string? deviceId, ProcessingPipeline pipeline)
+    /// <param name="sourceRing">Optional explicit source ring buffer (defaults to pipeline.RenderRing).</param>
+    /// <param name="isMonitoringTap">Whether this stream is a secondary self-monitoring headphone stream.</param>
+    public WasapiRenderStream(
+        string? deviceId,
+        ProcessingPipeline pipeline,
+        Core.Buffers.SpscRingBuffer? sourceRing = null,
+        bool isMonitoringTap = false)
     {
         _deviceId = deviceId;
         _pipeline = pipeline;
+        _sourceRing = sourceRing ?? pipeline.RenderRing;
+        _isMonitoringTap = isMonitoringTap;
     }
 
     /// <summary>
@@ -325,13 +335,13 @@ public sealed class WasapiRenderStream : IDisposable
         if (hr == WasapiConstants.S_OK && pData != 0)
         {
             var outputSpan = new Span<float>((void*)pData, (int)framesNeeded);
-            int read = _pipeline.RenderRing.Read(outputSpan);
+            int read = _sourceRing.Read(outputSpan);
 
             if (read < (int)framesNeeded)
             {
                 // Underflow: pad remainder with silence and record metric
                 outputSpan.Slice(read).Clear();
-                if (_pipeline.IsStreamingActive)
+                if (_pipeline.IsStreamingActive && !_isMonitoringTap)
                 {
                     _pipeline.RecordUnderrun((int)framesNeeded - read);
                 }

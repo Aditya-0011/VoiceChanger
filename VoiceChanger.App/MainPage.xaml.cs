@@ -1,29 +1,35 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using VoiceChanger.App.Services;
 using VoiceChanger.Audio;
 using VoiceChanger.Audio.Devices;
-using VoiceChanger.Core;
+using VoiceChanger.Audio.Telemetry;
 using VoiceChanger.Core.Dsp;
+using VoiceChanger.Core.Presets;
 
 namespace VoiceChanger.App;
 
 /// <summary>
-/// Voice transformation and diagnostics page.
+/// Voice transformation, presets, and diagnostics page (Phase 3).
 /// </summary>
 public sealed partial class MainPage : Page
 {
+    private readonly ProcessorChain _chain;
     private readonly AudioEngine _engine;
-    private readonly PassthroughProcessor _passthrough;
-    private readonly PhaseVocoderProcessor _vocoder;
+    private readonly PresetManager _presetManager;
+    private readonly TelemetryLogger _telemetryLogger;
     private readonly DispatcherTimer _diagTimer;
+    private HotkeyService? _hotkeyService;
+    private bool _isUpdatingUi;
 
     public MainPage()
     {
         try
         {
-            _passthrough = new PassthroughProcessor();
-            _vocoder = new PhaseVocoderProcessor(frameSize: 1024, analysisHop: 256, initialSemitones: 0.0f);
-            _engine = new AudioEngine(_vocoder);
+            _chain = new ProcessorChain(new DspParameters());
+            _engine = new AudioEngine(_chain);
+            _presetManager = new PresetManager();
+            _telemetryLogger = new TelemetryLogger();
 
             _diagTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(250) };
             _diagTimer.Tick += OnDiagTimerTick;
@@ -40,7 +46,7 @@ public sealed partial class MainPage : Page
         {
             try
             {
-                System.IO.File.WriteAllText(@"crash.txt", $"MainPage Constructor Exception: {ex.Message}\n{ex}\n{ex.StackTrace}");
+                File.WriteAllText(@"crash.txt", $"MainPage Constructor Exception: {ex.Message}\n{ex}\n{ex.StackTrace}");
             }
             catch { }
             throw;
@@ -51,10 +57,29 @@ public sealed partial class MainPage : Page
     {
         WarmupDsp();
         RefreshDevices();
+        LoadPresetsUi();
+        InitializeHotkeys();
+
+        if (LogPathText != null)
+        {
+            LogPathText.Text = $"Destination: {_telemetryLogger.LogFilePath}";
+        }
+
+        // Support command-line flag --telemetry or --log-telemetry or -t, or environment variable to auto-enable on launch
+        if (App.IsTelemetryFlagEnabled() && TelemetryLogToggle != null)
+        {
+            _telemetryLogger.IsEnabled = true;
+            TelemetryLogToggle.IsOn = true;
+        }
     }
 
     private void OnPageUnloaded(object sender, RoutedEventArgs e)
     {
+        _hotkeyService?.Dispose();
+        _hotkeyService = null;
+
+        _telemetryLogger?.Dispose();
+
         _engine.Stop();
         _engine.Dispose();
     }
@@ -64,11 +89,15 @@ public sealed partial class MainPage : Page
     /// </summary>
     private static void WarmupDsp()
     {
-        var passthrough = new PassthroughProcessor();
-        passthrough.Prepare(48000, 1024);
-
-        var vocoder = new PhaseVocoderProcessor(frameSize: 1024, analysisHop: 256, initialSemitones: 5.0f);
-        vocoder.Prepare(48000, 1024);
+        var chain = new ProcessorChain(new DspParameters
+        {
+            PitchSemitones = 3.0f,
+            FormantSemitones = 4.0f,
+            NoiseGateEnabled = true,
+            NoiseGateThresholdDb = -45.0f,
+            DryWetMix = 0.8f
+        });
+        chain.Prepare(48000, 256);
 
         Span<float> input = stackalloc float[256];
         Span<float> output = stackalloc float[256];
@@ -76,8 +105,7 @@ public sealed partial class MainPage : Page
 
         for (int i = 0; i < 500; i++)
         {
-            passthrough.Process(input, output);
-            vocoder.Process(input, output);
+            chain.Process(input, output);
         }
     }
 
@@ -106,7 +134,7 @@ public sealed partial class MainPage : Page
             OutputDeviceCombo.ItemsSource = renderDevices;
             if (renderDevices.Count > 0)
             {
-                // Prefer VB-CABLE if present per Project.md Phase 0
+                // Prefer VB-CABLE for primary output if present per Project.md Phase 0
                 int selectedIndex = 0;
                 for (int i = 0; i < renderDevices.Count; i++)
                 {
@@ -122,6 +150,26 @@ public sealed partial class MainPage : Page
                     }
                 }
                 OutputDeviceCombo.SelectedIndex = selectedIndex;
+            }
+
+            // Headphone Monitoring devices: filter out speakers to prevent feedback loops (Phase 3 Safety Guard)
+            var headphoneDevices = renderDevices.Where(d => !d.Name.Contains("Speaker", StringComparison.OrdinalIgnoreCase)).ToList();
+            MonitorDeviceCombo.ItemsSource = headphoneDevices.Count > 0 ? headphoneDevices : renderDevices;
+            if (MonitorDeviceCombo.Items.Count > 0)
+            {
+                // Pick first non-cable headphone or default
+                int monitorIndex = 0;
+                for (int i = 0; i < MonitorDeviceCombo.Items.Count; i++)
+                {
+                    if (MonitorDeviceCombo.Items[i] is AudioDeviceInfo dev &&
+                        (dev.Name.Contains("Headphone", StringComparison.OrdinalIgnoreCase) ||
+                         dev.Name.Contains("Headset", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        monitorIndex = i;
+                        break;
+                    }
+                }
+                MonitorDeviceCombo.SelectedIndex = monitorIndex;
             }
 
             if (captureDevices.Count == 0)
@@ -146,6 +194,243 @@ public sealed partial class MainPage : Page
     private void OnRefreshDevicesClicked(object sender, RoutedEventArgs e)
     {
         RefreshDevices();
+    }
+
+    private void LoadPresetsUi()
+    {
+        try
+        {
+            _presetManager.Load();
+            PresetCombo.ItemsSource = null;
+            PresetCombo.ItemsSource = _presetManager.Presets;
+
+            if (_presetManager.Presets.Count > 0)
+            {
+                PresetCombo.SelectedIndex = 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowAlert($"Error loading presets: {ex.Message}", InfoBarSeverity.Warning);
+        }
+    }
+
+    private void InitializeHotkeys()
+    {
+        try
+        {
+            nint hWnd = App.MainWindowInstance != null ? WinRT.Interop.WindowNative.GetWindowHandle(App.MainWindowInstance) : 0;
+            if (hWnd != 0)
+            {
+                _hotkeyService?.Dispose();
+                _hotkeyService = new HotkeyService(hWnd, DispatcherQueue);
+                _hotkeyService.HotkeyPressed += OnHotkeyPressed;
+
+                foreach (var preset in _presetManager.Presets)
+                {
+                    if (!string.IsNullOrWhiteSpace(preset.Hotkey))
+                    {
+                        _hotkeyService.Register(preset.Hotkey, preset.Id);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"Error initializing hotkeys: {ex.Message}");
+        }
+    }
+
+    private void OnHotkeyPressed(string presetId)
+    {
+        var preset = _presetManager.Presets.FirstOrDefault(p => p.Id == presetId);
+        if (preset != null)
+        {
+            ApplyPresetToUi(preset);
+            ShowAlert($"Activated preset: '{preset.Name}' via global hotkey.", InfoBarSeverity.Informational);
+        }
+    }
+
+    private void ApplyPresetToUi(Preset preset)
+    {
+        _isUpdatingUi = true;
+        try
+        {
+            for (int i = 0; i < PresetCombo.Items.Count; i++)
+            {
+                if (PresetCombo.Items[i] is Preset p && p.Id == preset.Id)
+                {
+                    PresetCombo.SelectedIndex = i;
+                    break;
+                }
+            }
+
+            if (PitchSlider != null) PitchSlider.Value = preset.PitchSemitones;
+            if (FormantSlider != null) FormantSlider.Value = preset.FormantSemitones;
+            if (VocoderToggle != null) VocoderToggle.IsOn = preset.VocoderEnabled;
+            if (GateToggle != null) GateToggle.IsOn = preset.NoiseGateEnabled;
+            if (GateThresholdSlider != null) GateThresholdSlider.Value = preset.NoiseGateThresholdDb;
+            if (GateAttackSlider != null) GateAttackSlider.Value = preset.NoiseGateAttackMs;
+            if (GateReleaseSlider != null) GateReleaseSlider.Value = preset.NoiseGateReleaseMs;
+            if (DryWetSlider != null) DryWetSlider.Value = preset.DryWetMix * 100.0;
+
+            UpdateParameterTextDisplays();
+            _engine.ApplyParameters(preset.ToParameters());
+        }
+        finally
+        {
+            _isUpdatingUi = false;
+        }
+    }
+
+    private void OnPresetSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isUpdatingUi) return;
+
+        if (PresetCombo.SelectedItem is Preset preset)
+        {
+            ApplyPresetToUi(preset);
+        }
+    }
+
+    private void OnSavePresetClicked(object sender, RoutedEventArgs e)
+    {
+        if (PresetCombo.SelectedItem is Preset preset)
+        {
+            preset.PitchSemitones = (float)PitchSlider.Value;
+            preset.FormantSemitones = (float)FormantSlider.Value;
+            preset.VocoderEnabled = VocoderToggle.IsOn;
+            preset.NoiseGateEnabled = GateToggle.IsOn;
+            preset.NoiseGateThresholdDb = (float)GateThresholdSlider.Value;
+            preset.NoiseGateAttackMs = (float)GateAttackSlider.Value;
+            preset.NoiseGateReleaseMs = (float)GateReleaseSlider.Value;
+            preset.DryWetMix = (float)(DryWetSlider.Value / 100.0);
+
+            _presetManager.AddOrUpdate(preset);
+            ShowAlert($"Preset '{preset.Name}' saved successfully to %APPDATA%.", InfoBarSeverity.Success);
+        }
+    }
+
+    private void OnResetDefaultsClicked(object sender, RoutedEventArgs e)
+    {
+        _presetManager.ResetToDefaults();
+        LoadPresetsUi();
+        InitializeHotkeys();
+        ShowAlert("Factory default presets restored.", InfoBarSeverity.Informational);
+    }
+
+    private void OnQuickPresetTagClicked(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button btn && btn.Tag is string tagStr)
+        {
+            OnHotkeyPressed(tagStr);
+        }
+    }
+
+    private void OnParameterControlChanged(object? sender, object? e)
+    {
+        if (_isUpdatingUi) return;
+
+        UpdateParameterTextDisplays();
+
+        var parameters = new DspParameters
+        {
+            PitchSemitones = (float)(PitchSlider?.Value ?? 0.0),
+            FormantSemitones = (float)(FormantSlider?.Value ?? 0.0),
+            VocoderEnabled = VocoderToggle?.IsOn ?? true,
+            NoiseGateEnabled = GateToggle?.IsOn ?? true,
+            NoiseGateThresholdDb = (float)(GateThresholdSlider?.Value ?? -45.0),
+            NoiseGateAttackMs = (float)(GateAttackSlider?.Value ?? 5.0),
+            NoiseGateReleaseMs = (float)(GateReleaseSlider?.Value ?? 80.0),
+            DryWetMix = (float)((DryWetSlider?.Value ?? 100.0) / 100.0)
+        };
+
+        _engine.ApplyParameters(parameters);
+    }
+
+    private void UpdateParameterTextDisplays()
+    {
+        if (PitchSlider != null && PitchValueText != null)
+        {
+            float pitch = (float)PitchSlider.Value;
+            double ratio = Math.Pow(2.0, pitch / 12.0);
+            PitchValueText.Text = $"{pitch:+0.0;-0.0;0.0} semitones ({ratio:F2}x)";
+        }
+
+        if (FormantSlider != null && FormantValueText != null)
+        {
+            float formant = (float)FormantSlider.Value;
+            double ratio = Math.Pow(2.0, formant / 12.0);
+            FormantValueText.Text = $"{formant:+0.0;-0.0;0.0} semitones ({ratio:F2}x)";
+        }
+
+        if (GateThresholdSlider != null && GateThresholdText != null)
+        {
+            GateThresholdText.Text = $"{GateThresholdSlider.Value:F0} dB";
+        }
+
+        if (GateAttackSlider != null && GateAttackText != null)
+        {
+            GateAttackText.Text = $"{GateAttackSlider.Value:F0} ms";
+        }
+
+        if (GateReleaseSlider != null && GateReleaseText != null)
+        {
+            GateReleaseText.Text = $"{GateReleaseSlider.Value:F0} ms";
+        }
+
+        if (DryWetSlider != null && DryWetText != null)
+        {
+            int val = (int)DryWetSlider.Value;
+            DryWetText.Text = val switch
+            {
+                100 => "100% (Full Wet)",
+                0 => "0% (Full Dry)",
+                _ => $"{val}%"
+            };
+        }
+    }
+
+    private void OnMonitorToggled(object sender, RoutedEventArgs e)
+    {
+        if (MonitorToggle.IsOn)
+        {
+            MonitorDevicePanel.Visibility = Visibility.Visible;
+            if (_engine.IsRunning)
+            {
+                StartMonitoringSafe();
+            }
+        }
+        else
+        {
+            MonitorDevicePanel.Visibility = Visibility.Collapsed;
+            _engine.StopMonitoring();
+        }
+    }
+
+    private void OnMonitorDeviceSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_engine.IsRunning && MonitorToggle.IsOn)
+        {
+            StartMonitoringSafe();
+        }
+    }
+
+    private void StartMonitoringSafe()
+    {
+        if (MonitorDeviceCombo.SelectedItem is AudioDeviceInfo monitorDevice)
+        {
+            try
+            {
+                _engine.StartMonitoring(monitorDevice.Id);
+                AlertInfoBar.IsOpen = false;
+            }
+            catch (Exception ex)
+            {
+                MonitorToggle.IsOn = false;
+                ShowAlert($"Monitoring notice: {ex.Message}", InfoBarSeverity.Warning);
+            }
+        }
     }
 
     private void OnToggleEngineClicked(object sender, RoutedEventArgs e)
@@ -175,6 +460,12 @@ public sealed partial class MainPage : Page
             _diagTimer.Start();
             ToggleEngineButton.Content = "Stop Audio Engine";
             StatusText.Text = "Running";
+
+            // If headphone self-monitoring is checked, open secondary monitor stream
+            if (MonitorToggle.IsOn)
+            {
+                StartMonitoringSafe();
+            }
 
             if (_engine.StartupLatency is { } latency)
             {
@@ -221,6 +512,44 @@ public sealed partial class MainPage : Page
         DriftRateText.Text = $"{drift.DriftRateSamplesPerSec:+0.0;-0.0;0.0} /s";
         DriftCorrectionsText.Text = $"{drift.DroppedSampleCount} / {drift.DuplicatedSampleCount}";
         IntegrityText.Text = $"{pipeline.OverrunFrames} / {pipeline.UnderrunFrames}";
+
+        // Write live telemetry and parameter snapshot to root telemetry.log
+        if (_telemetryLogger.IsEnabled)
+        {
+            _telemetryLogger.LogSnapshot(
+                _engine.ProcessingLatency,
+                fillPct,
+                drift.FillMs,
+                drift.DriftRateSamplesPerSec,
+                drift.DroppedSampleCount,
+                drift.DuplicatedSampleCount,
+                pipeline.OverrunFrames,
+                pipeline.UnderrunFrames,
+                (PresetCombo?.SelectedItem as Preset)?.Name,
+                _chain.Parameters,
+                (InputDeviceCombo?.SelectedItem as AudioDeviceInfo)?.Name,
+                (OutputDeviceCombo?.SelectedItem as AudioDeviceInfo)?.Name,
+                _engine.IsMonitoring,
+                (MonitorDeviceCombo?.SelectedItem as AudioDeviceInfo)?.Name);
+        }
+    }
+
+    private void OnTelemetryLogToggled(object sender, RoutedEventArgs e)
+    {
+        if (_telemetryLogger != null && TelemetryLogToggle != null)
+        {
+            _telemetryLogger.IsEnabled = TelemetryLogToggle.IsOn;
+            if (TelemetryLogToggle.IsOn)
+            {
+                ShowAlert($"Continuous telemetry logging active: writing to {_telemetryLogger.LogFilePath}", InfoBarSeverity.Informational);
+            }
+        }
+    }
+
+    private void OnClearLogClicked(object sender, RoutedEventArgs e)
+    {
+        _telemetryLogger?.ClearLog();
+        ShowAlert("Telemetry log cleared.", InfoBarSeverity.Informational);
     }
 
     private void ResetDiagnosticsUi()
@@ -278,58 +607,6 @@ public sealed partial class MainPage : Page
             StatusText.Text = "Stopped";
             ResetDiagnosticsUi();
         });
-    }
-
-    private void OnVocoderToggled(object sender, RoutedEventArgs e)
-    {
-        if (_engine == null || _vocoder == null || _passthrough == null || VocoderToggle == null)
-        {
-            return;
-        }
-
-        if (VocoderToggle.IsOn)
-        {
-            if (PitchSlider != null)
-            {
-                _vocoder.PitchSemitones = (float)PitchSlider.Value;
-            }
-            _engine.SetProcessor(_vocoder);
-        }
-        else
-        {
-            _engine.SetProcessor(_passthrough);
-        }
-    }
-
-    private void OnPitchSliderValueChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
-    {
-        float semitones = (float)e.NewValue;
-        if (_vocoder != null)
-        {
-            _vocoder.PitchSemitones = semitones;
-        }
-
-        if (PitchValueText != null)
-        {
-            double ratio = Math.Pow(2.0, semitones / 12.0);
-            PitchValueText.Text = $"{semitones:+0.0;-0.0;0.0} semitones ({ratio:F2}x)";
-        }
-    }
-
-    private void OnPresetClicked(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button btn && btn.Tag is string tagStr && float.TryParse(tagStr, out float semitones))
-        {
-            if (PitchSlider != null)
-            {
-                PitchSlider.Value = semitones;
-            }
-
-            if (VocoderToggle != null && !VocoderToggle.IsOn)
-            {
-                VocoderToggle.IsOn = true;
-            }
-        }
     }
 
     private void ShowAlert(string message, InfoBarSeverity severity)

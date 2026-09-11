@@ -17,6 +17,7 @@ public sealed class AudioEngine : IDisposable
     private readonly ProcessingPipeline _pipeline;
     private WasapiCaptureStream? _captureStream;
     private WasapiRenderStream? _renderStream;
+    private WasapiRenderStream? _monitorStream;
     private IAudioProcessor _processor;
     private bool _isRunning;
     private bool _disposed;
@@ -48,6 +49,19 @@ public sealed class AudioEngine : IDisposable
     /// Current output device ID in use.
     /// </summary>
     public string? OutputDeviceId { get; private set; }
+
+    /// <summary>
+    /// Current headphone self-monitoring device ID in use, or null if disabled.
+    /// </summary>
+    public string? MonitorDeviceId { get; private set; }
+
+    /// <summary>
+    /// Whether headphone self-monitoring is actively running.
+    /// </summary>
+    public bool IsMonitoring
+    {
+        get { lock (_lock) return _monitorStream != null; }
+    }
 
     /// <summary>
     /// Active processing pipeline with worker thread and SPSC ring buffers.
@@ -152,6 +166,13 @@ public sealed class AudioEngine : IDisposable
     {
         _isRunning = false;
 
+        if (_monitorStream != null)
+        {
+            _pipeline.IsMonitoringEnabled = false;
+            _monitorStream.Dispose();
+            _monitorStream = null;
+        }
+
         if (_captureStream != null)
         {
             _captureStream.DeviceInvalidated -= OnDeviceInvalidated;
@@ -214,6 +235,88 @@ public sealed class AudioEngine : IDisposable
         if (_isRunning && _captureStream != null && _renderStream != null)
         {
             StartupLatency = MeasureStartupLatency(_captureStream, _renderStream, newProcessor);
+        }
+    }
+
+    /// <summary>
+    /// Starts self-monitoring to a secondary headphone device (Phase 3).
+    /// Strictly protects against routing to speakers to avoid audio feedback loops.
+    /// </summary>
+    /// <param name="headphoneDeviceId">Selected headphone render endpoint ID.</param>
+    public void StartMonitoring(string headphoneDeviceId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(headphoneDeviceId);
+
+        lock (_lock)
+        {
+            if (!_isRunning)
+            {
+                throw new InvalidOperationException("Audio engine must be running before starting self-monitoring.");
+            }
+
+            // Invariant & Safety Guard: Verify target is not a speaker
+            var renderDevices = AudioDeviceList.GetRenderDevices();
+            var targetDevice = renderDevices.FirstOrDefault(d => d.Id == headphoneDeviceId);
+            if (targetDevice != null && targetDevice.Name.Contains("Speaker", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    "Self-monitoring cannot be routed through speakers. Microphone recapture will cause a pitch-climbing feedback loop. Please select headphones.");
+            }
+
+            StopMonitoring();
+
+            try
+            {
+                MonitorDeviceId = headphoneDeviceId;
+                _pipeline.IsMonitoringEnabled = true;
+                _monitorStream = new WasapiRenderStream(
+                    headphoneDeviceId,
+                    _pipeline,
+                    sourceRing: _pipeline.MonitorRing,
+                    isMonitoringTap: true);
+                _monitorStream.Initialize();
+                _monitorStream.Start();
+            }
+            catch
+            {
+                StopMonitoring();
+                throw;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Stops headphone self-monitoring.
+    /// </summary>
+    public void StopMonitoring()
+    {
+        lock (_lock)
+        {
+            _pipeline.IsMonitoringEnabled = false;
+            if (_monitorStream != null)
+            {
+                _monitorStream.Dispose();
+                _monitorStream = null;
+            }
+            MonitorDeviceId = null;
+        }
+    }
+
+    /// <summary>
+    /// Applies a runtime snapshot of DSP parameters to the active processor chain without restarting audio streams.
+    /// </summary>
+    /// <param name="parameters">Immutable snapshot of DSP parameters.</param>
+    public void ApplyParameters(Core.Dsp.DspParameters parameters)
+    {
+        ArgumentNullException.ThrowIfNull(parameters);
+        if (_processor is Core.Dsp.ProcessorChain chain)
+        {
+            chain.Parameters = parameters;
+        }
+        else if (_processor is Core.Dsp.PhaseVocoderProcessor vocoder)
+        {
+            vocoder.PitchSemitones = parameters.PitchSemitones;
+            vocoder.FormantSemitones = parameters.FormantSemitones;
         }
     }
 

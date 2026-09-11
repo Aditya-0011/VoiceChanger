@@ -17,11 +17,14 @@ public sealed class ProcessingPipeline : IDisposable
 {
     private readonly SpscRingBuffer _captureRing;
     private readonly SpscRingBuffer _renderRing;
+    private readonly SpscRingBuffer _monitorRing;
     private readonly ClockDriftController _driftController;
     private readonly int _chunkSize;
     private readonly float[] _inputChunk;
     private readonly float[] _outputChunk;
     private readonly AutoResetEvent _dataAvailableEvent;
+
+    private volatile bool _isMonitoringEnabled;
 
     private Thread? _workerThread;
     private volatile bool _isStopping;
@@ -43,6 +46,20 @@ public sealed class ProcessingPipeline : IDisposable
     /// Ring buffer feeding processed audio into WASAPI render stream.
     /// </summary>
     public SpscRingBuffer RenderRing => _renderRing;
+
+    /// <summary>
+    /// Secondary ring buffer feeding headphone self-monitoring stream (Phase 3).
+    /// </summary>
+    public SpscRingBuffer MonitorRing => _monitorRing;
+
+    /// <summary>
+    /// Gets or sets whether self-monitoring is active.
+    /// </summary>
+    public bool IsMonitoringEnabled
+    {
+        get => _isMonitoringEnabled;
+        set => _isMonitoringEnabled = value;
+    }
 
     /// <summary>
     /// Clock drift controller monitoring and balancing audio clocks.
@@ -92,6 +109,7 @@ public sealed class ProcessingPipeline : IDisposable
         _chunkSize = chunkSize;
         _captureRing = new SpscRingBuffer(ringCapacity);
         _renderRing = new SpscRingBuffer(ringCapacity);
+        _monitorRing = new SpscRingBuffer(ringCapacity);
         _targetFrames = 1440;
         _driftController = new ClockDriftController(
             _renderRing,
@@ -283,57 +301,45 @@ public sealed class ProcessingPipeline : IDisposable
             double elapsedMs = (double)(t1 - t0) * 1000.0 / Stopwatch.Frequency;
             RecordProcessDuration(elapsedMs);
 
-            // Handle clock drift correction:
+            // Handle clock drift correction frames:
             // +2 = Drop 2 samples (fast correction) -> write chunkSize - 2 frames
             // +1 = Drop 1 sample (gentle correction) -> write chunkSize - 1 frames
             // -1 = Duplicate sample (buffer too empty) -> write chunkSize + 1 frames
+            // -2 = Duplicate 2 samples (aggressive low recovery) -> write chunkSize + 2 frames
             // 0  = Standard -> write chunkSize frames
-            if (correction == 1 && _chunkSize > 1)
+            int writeFrames = correction switch
             {
-                // Drop 1 sample: write chunkSize - 1 frames
-                ReadOnlySpan<float> toWrite = _outputChunk.AsSpan(0, _chunkSize - 1);
-                if (!_renderRing.Write(toWrite))
-                {
-                    RecordOverrun(toWrite.Length);
-                }
-            }
-            else if (correction == 2 && _chunkSize > 2)
+                1 when _chunkSize > 1 => _chunkSize - 1,
+                2 when _chunkSize > 2 => _chunkSize - 2,
+                -2 => _chunkSize + 2,
+                -1 => _chunkSize + 1,
+                _ => _chunkSize
+            };
+
+            if (correction == -2)
             {
-                // Drop 2 samples: write chunkSize - 2 frames (fast slew)
-                ReadOnlySpan<float> toWrite = _outputChunk.AsSpan(0, _chunkSize - 2);
-                if (!_renderRing.Write(toWrite))
-                {
-                    RecordOverrun(toWrite.Length);
-                }
-            }
-            else if (correction == -2)
-            {
-                // Duplicate 2 samples: append copies of last sample for aggressive low recovery
                 _outputChunk[_chunkSize] = _outputChunk[_chunkSize - 1];
                 _outputChunk[_chunkSize + 1] = _outputChunk[_chunkSize - 1];
-                ReadOnlySpan<float> toWrite = _outputChunk.AsSpan(0, _chunkSize + 2);
-                if (!_renderRing.Write(toWrite))
-                {
-                    RecordOverrun(toWrite.Length);
-                }
             }
             else if (correction == -1)
             {
-                // Duplicate 1 sample: append copy of last sample
                 _outputChunk[_chunkSize] = _outputChunk[_chunkSize - 1];
-                ReadOnlySpan<float> toWrite = _outputChunk.AsSpan(0, _chunkSize + 1);
-                if (!_renderRing.Write(toWrite))
-                {
-                    RecordOverrun(toWrite.Length);
-                }
             }
-            else
+
+            ReadOnlySpan<float> toWrite = _outputChunk.AsSpan(0, writeFrames);
+            if (!_renderRing.Write(toWrite))
             {
-                // Normal write
-                ReadOnlySpan<float> toWrite = _outputChunk.AsSpan(0, _chunkSize);
-                if (!_renderRing.Write(toWrite))
+                RecordOverrun(toWrite.Length);
+            }
+
+            // Phase 3: Secondary tap for headphone self-monitoring
+            if (_isMonitoringEnabled)
+            {
+                if (!_monitorRing.Write(toWrite))
                 {
-                    RecordOverrun(toWrite.Length);
+                    // Monitor buffer full: discard oldest to maintain low-latency live monitoring
+                    _monitorRing.Discard(toWrite.Length);
+                    _monitorRing.Write(toWrite);
                 }
             }
         }

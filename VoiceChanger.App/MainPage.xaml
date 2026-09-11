@@ -9,26 +9,52 @@
     mc:Ignorable="d">
 
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-        <StackPanel Spacing="24" Padding="36,24,36,36" MaxWidth="800" HorizontalAlignment="Left">
+        <StackPanel Spacing="20" Padding="36,24,36,36" MaxWidth="840" HorizontalAlignment="Left">
 
             <!-- Header -->
             <StackPanel Spacing="4">
-                <TextBlock Text="Phase 0: WASAPI Passthrough" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="SemiBold" />
-                <TextBlock Text="Real-time low-latency voice capture and routing via WASAPI shared mode event-driven streams."
+                <TextBlock Text="VoiceChanger: Real-Time Audio DSP (Phase 3)" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="SemiBold" />
+                <TextBlock Text="Zero-allocation phase vocoder with independent formant warping, noise gating, presets, and global in-game hotkeys."
                            Style="{ThemeResource BodyTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </StackPanel>
 
             <!-- Error InfoBar -->
             <InfoBar x:Name="AlertInfoBar" IsOpen="False" Severity="Error" Title="Audio Notice" IsClosable="True" />
 
-            <!-- Device Selection Card -->
+            <!-- Control & Status Card -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Button x:Name="ToggleEngineButton"
+                            Grid.Column="0"
+                            Content="Start Audio Engine"
+                            Style="{ThemeResource AccentButtonStyle}"
+                            Width="180"
+                            Click="OnToggleEngineClicked" />
+
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                        <TextBlock Text="Engine Status:" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <TextBlock x:Name="StatusText" Text="Stopped" FontWeight="SemiBold" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <!-- Device Selection & Monitoring Card -->
             <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
                     CornerRadius="8"
                     Padding="20">
                 <StackPanel Spacing="16">
-                    <TextBlock Text="Audio Endpoints" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                    <TextBlock Text="Audio Endpoints &amp; Headphone Monitoring" Style="{ThemeResource SubtitleTextBlockStyle}" />
 
                     <!-- Input Device -->
                     <StackPanel Spacing="6">
@@ -38,39 +64,44 @@
 
                     <!-- Output Device -->
                     <StackPanel Spacing="6">
-                        <TextBlock Text="Output Device (Select VB-CABLE or Headphones)" FontWeight="Medium" />
+                        <TextBlock Text="Output Device (VB-CABLE or Virtual Cable)" FontWeight="Medium" />
                         <ComboBox x:Name="OutputDeviceCombo" HorizontalAlignment="Stretch" DisplayMemberPath="Name" />
                     </StackPanel>
 
                     <Button Content="Refresh Device List" Click="OnRefreshDevicesClicked" HorizontalAlignment="Left" />
-                </StackPanel>
-            </Border>
 
-            <!-- Control & Status Card -->
-            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
-                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                    BorderThickness="1"
-                    CornerRadius="8"
-                    Padding="20">
-                <StackPanel Spacing="16">
-                    <TextBlock Text="Engine State" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                    <MenuFlyoutSeparator />
 
-                    <StackPanel Orientation="Horizontal" Spacing="16" VerticalAlignment="Center">
-                        <Button x:Name="ToggleEngineButton"
-                                Content="Start Passthrough"
-                                Style="{ThemeResource AccentButtonStyle}"
-                                Width="160"
-                                Click="OnToggleEngineClicked" />
+                    <!-- Headphone Self-Monitoring Section (P3-7) -->
+                    <StackPanel Spacing="10">
+                        <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Spacing="2">
+                                <TextBlock Text="Headphone Self-Monitoring" FontWeight="Medium" />
+                                <TextBlock Text="Routes a live processed audio copy directly to your headphones with low latency."
+                                           Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                                <TextBlock Text="Safety guard: Speakers are blocked to prevent pitch-climbing feedback loops."
+                                           Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                            </StackPanel>
+                            <ToggleSwitch x:Name="MonitorToggle" Grid.Column="1"
+                                          OnContent="Active" OffContent="Disabled"
+                                          IsOn="False"
+                                          Toggled="OnMonitorToggled" />
+                        </Grid>
 
-                        <StackPanel Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
-                            <TextBlock Text="Status:" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                            <TextBlock x:Name="StatusText" Text="Stopped" FontWeight="SemiBold" />
+                        <StackPanel x:Name="MonitorDevicePanel" Spacing="6" Visibility="Collapsed">
+                            <TextBlock Text="Monitoring Headphone Device" FontWeight="Medium" />
+                            <ComboBox x:Name="MonitorDeviceCombo" HorizontalAlignment="Stretch" DisplayMemberPath="Name"
+                                      SelectionChanged="OnMonitorDeviceSelectionChanged" />
                         </StackPanel>
                     </StackPanel>
                 </StackPanel>
             </Border>
 
-            <!-- Phase 2: Phase Vocoder Pitch Shift Card -->
+            <!-- Presets & Global Hotkeys Card (P3-4, P3-5, P3-6) -->
             <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
@@ -78,57 +109,193 @@
                     Padding="20">
                 <StackPanel Spacing="16">
                     <StackPanel Spacing="2">
-                        <TextBlock Text="DSP Phase Vocoder Pitch Shift (Phase 2)" Style="{ThemeResource SubtitleTextBlockStyle}" />
-                        <TextBlock Text="Real-time pitch shifting without changing speech tempo via STFT, instantaneous phase tracking, and Catmull-Rom cubic resampling."
+                        <TextBlock Text="Voice Presets &amp; Global Game Hotkeys" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="Saved in %APPDATA%\VoiceChanger\presets.json. Global shortcuts switch presets while fullscreen games are focused."
                                    Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                     </StackPanel>
 
-                    <!-- Enable / Mode Switch -->
+                    <!-- Preset Selector Row -->
+                    <Grid ColumnSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+
+                        <ComboBox x:Name="PresetCombo" Grid.Column="0" HorizontalAlignment="Stretch"
+                                  DisplayMemberPath="Name"
+                                  SelectionChanged="OnPresetSelectionChanged" />
+
+                        <Button x:Name="SavePresetButton" Grid.Column="1" Content="Save Current" Click="OnSavePresetClicked" />
+                        <Button x:Name="ResetDefaultsButton" Grid.Column="2" Content="Reset Defaults" Click="OnResetDefaultsClicked" />
+                    </Grid>
+
+                    <!-- Quick Hotkey Badges -->
+                    <StackPanel Spacing="8">
+                        <TextBlock Text="Registered Global Hotkeys (In-Game)" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        <Grid ColumnSpacing="8" RowSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+
+                            <Button Grid.Row="0" Grid.Column="0" HorizontalAlignment="Stretch" Content="Ctrl+Shift+0: Natural" Tag="natural" Click="OnQuickPresetTagClicked" />
+                            <Button Grid.Row="0" Grid.Column="1" HorizontalAlignment="Stretch" Content="Ctrl+Shift+1: Deep Voice" Tag="deep" Click="OnQuickPresetTagClicked" />
+                            <Button Grid.Row="0" Grid.Column="2" HorizontalAlignment="Stretch" Content="Ctrl+Shift+2: Chipmunk" Tag="chipmunk" Click="OnQuickPresetTagClicked" />
+
+                            <Button Grid.Row="1" Grid.Column="0" HorizontalAlignment="Stretch" Content="Ctrl+Shift+3: Helium" Tag="helium" Click="OnQuickPresetTagClicked" />
+                            <Button Grid.Row="1" Grid.Column="1" HorizontalAlignment="Stretch" Content="Ctrl+Shift+4: Radio" Tag="radio" Click="OnQuickPresetTagClicked" />
+                            <Button Grid.Row="1" Grid.Column="2" HorizontalAlignment="Stretch" Content="Ctrl+Shift+5: Monster" Tag="monster" Click="OnQuickPresetTagClicked" />
+                        </Grid>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Voice Transformation Card (Phase 2 Pitch + Phase 3 Formants) -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="16">
                     <Grid ColumnSpacing="16" VerticalAlignment="Center">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
                         <StackPanel Grid.Column="0" Spacing="2">
-                            <TextBlock Text="Phase Vocoder DSP Tier" FontWeight="Medium" />
-                            <TextBlock Text="Enables real-time pitch transformation (zero heap allocations in audio loop)"
+                            <TextBlock Text="Voice Pitch &amp; Formant Transformation" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                            <TextBlock Text="Independent spectral envelope warping via cepstral liftering separates pitch from vocal tract resonance."
                                        Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </StackPanel>
                         <ToggleSwitch x:Name="VocoderToggle" Grid.Column="1"
                                       OnContent="Active" OffContent="Bypassed"
                                       IsOn="True"
-                                      Toggled="OnVocoderToggled" />
+                                      Toggled="OnParameterControlChanged" />
                     </Grid>
 
                     <!-- Pitch Shift Slider -->
-                    <StackPanel Spacing="8">
+                    <StackPanel Spacing="6">
                         <Grid>
-                            <TextBlock Text="Pitch Shift (Semitones)" FontWeight="Medium" HorizontalAlignment="Left" />
+                            <TextBlock Text="Pitch Shift (Fundamental Frequency)" FontWeight="Medium" HorizontalAlignment="Left" />
                             <TextBlock x:Name="PitchValueText" Text="0.0 semitones (1.00x)"
-                                       FontWeight="SemiBold"
-                                       Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                       FontWeight="SemiBold" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
                                        HorizontalAlignment="Right" />
                         </Grid>
                         <Slider x:Name="PitchSlider"
-                                Minimum="-12"
-                                Maximum="12"
-                                StepFrequency="0.5"
-                                TickFrequency="1"
-                                TickPlacement="Outside"
-                                Value="0"
-                                ValueChanged="OnPitchSliderValueChanged" />
+                                Minimum="-12" Maximum="12" StepFrequency="0.5" TickFrequency="1" TickPlacement="Outside"
+                                Value="0" ValueChanged="OnParameterControlChanged" />
                     </StackPanel>
 
-                    <!-- Quick Presets -->
-                    <StackPanel Spacing="8">
-                        <TextBlock Text="Quick Presets" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
-                        <StackPanel Orientation="Horizontal" Spacing="8">
-                            <Button Content="Octave Down (-12)" Click="OnPresetClicked" Tag="-12" />
-                            <Button Content="Deep Voice (-5)" Click="OnPresetClicked" Tag="-5" />
-                            <Button Content="Natural (0)" Click="OnPresetClicked" Tag="0" />
-                            <Button Content="High Pitch (+5)" Click="OnPresetClicked" Tag="5" />
-                            <Button Content="Octave Up (+12)" Click="OnPresetClicked" Tag="12" />
+                    <!-- Formant Shift Slider (P3-2) -->
+                    <StackPanel Spacing="6">
+                        <Grid>
+                            <TextBlock Text="Formant Shift (Vocal Tract Size / Envelope Warping)" FontWeight="Medium" HorizontalAlignment="Left" />
+                            <TextBlock x:Name="FormantValueText" Text="0.0 semitones (1.00x)"
+                                       FontWeight="SemiBold" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                       HorizontalAlignment="Right" />
+                        </Grid>
+                        <Slider x:Name="FormantSlider"
+                                Minimum="-12" Maximum="12" StepFrequency="0.5" TickFrequency="1" TickPlacement="Outside"
+                                Value="0" ValueChanged="OnParameterControlChanged" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Noise Gate & Dynamics Card (P3-1) -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="16">
+                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Noise Gate &amp; Dynamics (Pre-Vocoder)" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                            <TextBlock Text="Attenuates keyboard clicks, room reverb, and mic hiss before pitch shifting to eliminate squeaks."
+                                       Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
                         </StackPanel>
+                        <ToggleSwitch x:Name="GateToggle" Grid.Column="1"
+                                      OnContent="Active" OffContent="Bypassed"
+                                      IsOn="True"
+                                      Toggled="OnParameterControlChanged" />
+                    </Grid>
+
+                    <!-- Threshold Slider -->
+                    <StackPanel Spacing="6">
+                        <Grid>
+                            <TextBlock Text="Gate Threshold (dB)" FontWeight="Medium" HorizontalAlignment="Left" />
+                            <TextBlock x:Name="GateThresholdText" Text="-45.0 dB"
+                                       FontWeight="SemiBold" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                       HorizontalAlignment="Right" />
+                        </Grid>
+                        <Slider x:Name="GateThresholdSlider"
+                                Minimum="-60" Maximum="-20" StepFrequency="1" Value="-45"
+                                ValueChanged="OnParameterControlChanged" />
+                    </StackPanel>
+
+                    <!-- Attack & Release Grid -->
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Attack -->
+                        <StackPanel Grid.Column="0" Spacing="6">
+                            <Grid>
+                                <TextBlock Text="Attack Time" FontWeight="Medium" HorizontalAlignment="Left" />
+                                <TextBlock x:Name="GateAttackText" Text="5.0 ms" FontWeight="SemiBold" HorizontalAlignment="Right" />
+                            </Grid>
+                            <Slider x:Name="GateAttackSlider" Minimum="1" Maximum="20" StepFrequency="1" Value="5"
+                                    ValueChanged="OnParameterControlChanged" />
+                        </StackPanel>
+
+                        <!-- Release -->
+                        <StackPanel Grid.Column="1" Spacing="6">
+                            <Grid>
+                                <TextBlock Text="Release Time" FontWeight="Medium" HorizontalAlignment="Left" />
+                                <TextBlock x:Name="GateReleaseText" Text="80.0 ms" FontWeight="SemiBold" HorizontalAlignment="Right" />
+                            </Grid>
+                            <Slider x:Name="GateReleaseSlider" Minimum="20" Maximum="250" StepFrequency="5" Value="80"
+                                    ValueChanged="OnParameterControlChanged" />
+                        </StackPanel>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Output Mix Card (P3-3) -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="16">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Output Blend (Dry / Wet Mix)" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="Delay-compensated crossfade: dry input is time-aligned with the 1024-frame vocoder delay to prevent comb filtering."
+                                   Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <StackPanel Spacing="6">
+                        <Grid>
+                            <TextBlock Text="Mix Balance" FontWeight="Medium" HorizontalAlignment="Left" />
+                            <TextBlock x:Name="DryWetText" Text="100% (Full Wet)"
+                                       FontWeight="SemiBold" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                       HorizontalAlignment="Right" />
+                        </Grid>
+                        <Slider x:Name="DryWetSlider"
+                                Minimum="0" Maximum="100" StepFrequency="5" Value="100"
+                                ValueChanged="OnParameterControlChanged" />
                     </StackPanel>
                 </StackPanel>
             </Border>
@@ -249,6 +416,42 @@
 
                     <TextBlock x:Name="LatencyDetailsText" Text="Engine has not been started yet."
                                Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                </StackPanel>
+            </Border>
+
+            <!-- Continuous Telemetry Logging Card (Root telemetry.log) -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="16">
+                    <Grid ColumnSpacing="16" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0" Spacing="2">
+                            <TextBlock Text="Continuous Telemetry Logging (Root telemetry.log)" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                            <TextBlock Text="Continuously records live percentiles (p50/p95/p99/max), ring buffer metrics, drift, and DSP parameters into telemetry.log at the project root."
+                                       Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+                        <ToggleSwitch x:Name="TelemetryLogToggle" Grid.Column="1"
+                                      OnContent="Active" OffContent="Disabled"
+                                      IsOn="False"
+                                      Toggled="OnTelemetryLogToggled" />
+                    </Grid>
+
+                    <Grid ColumnSpacing="12" VerticalAlignment="Center">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock x:Name="LogPathText" Grid.Column="0" Text="Destination: telemetry.log (Project Root)"
+                                   Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                                   VerticalAlignment="Center" />
+                        <Button x:Name="ClearLogButton" Grid.Column="1" Content="Clear Log" Click="OnClearLogClicked" />
+                    </Grid>
                 </StackPanel>
             </Border>
 

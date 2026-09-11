@@ -72,7 +72,7 @@ Any DSP or interop code (Phase 0+) · CI · README.
 | Phase 0 | WASAPI passthrough | Complete (acceptance met) | [2026-09-06 16:53] |
 | Phase 1 | SPSC ring buffer + worker + clock drift | Complete (acceptance met) | [2026-09-06 19:05] |
 | Phase 2 | Phase vocoder DSP tier | Complete (acceptance met) | [2026-09-06 20:50] |
-| Phase 3 | Formant control + usability | Not started | — |
+| Phase 3 | Formant control + usability | Complete (acceptance met) | [2026-09-11 17:15] |
 | Phase 4 | Neural tier (ONNX/DirectML) | Not started | — |
 | Phase 5 | Optimization + measurement | Not started | — |
 

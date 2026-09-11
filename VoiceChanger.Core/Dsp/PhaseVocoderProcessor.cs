@@ -31,6 +31,8 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
 
     private volatile float _pitchSemitones;
     private double _stretchRatio = 1.0;
+    private volatile float _formantSemitones;
+    private double _formantRatio = 1.0;
     private int _sampleRate = 48000;
     private int _maxBlockSize = 256;
     private bool _isPrepared;
@@ -39,6 +41,13 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
     private float[] _analysisPhase = [];
     private int[] _peakMap = [];
     private bool _isPhaseInitialized;
+
+    // Pre-allocated Formant Warping (Cepstral Liftering) Buffers (P3-2)
+    private float[] _cepstrumReal = [];
+    private float[] _cepstrumImag = [];
+    private float[] _spectralEnvelope = [];
+    private float[] _warpedEnvelope = [];
+    private float[] _lifterWindow = [];
 
     /// <summary>
     /// Gets or sets the pitch shift in semitones (typically -12.0 to +12.0).
@@ -51,6 +60,20 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
         {
             _pitchSemitones = value;
             _stretchRatio = Math.Pow(2.0, value / 12.0);
+        }
+    }
+
+    /// <summary>
+    /// Gets or sets the formant shift in semitones (typically -12.0 to +12.0).
+    /// Can be updated dynamically on any thread without stopping or allocating.
+    /// </summary>
+    public float FormantSemitones
+    {
+        get => _formantSemitones;
+        set
+        {
+            _formantSemitones = value;
+            _formantRatio = Math.Pow(2.0, value / 12.0);
         }
     }
 
@@ -115,6 +138,27 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
 
         _intermediateChunk = new float[_frameSize * 2];
 
+        // Prepare cepstral liftering buffers for formant warping
+        _cepstrumReal = new float[_frameSize];
+        _cepstrumImag = new float[_frameSize];
+        _spectralEnvelope = new float[numBins];
+        _warpedEnvelope = new float[numBins];
+        _lifterWindow = new float[_frameSize];
+
+        // Design low-quefrency lifter with smooth cosine taper (cutoff Qc = 32 samples ~ 0.67 ms @ 48 kHz)
+        int cutoffQuefrency = Math.Min(32, _frameSize / 8);
+        _lifterWindow[0] = 1.0f;
+        for (int q = 1; q < cutoffQuefrency; q++)
+        {
+            float w = 0.5f * (1.0f + MathF.Cos(MathF.PI * q / cutoffQuefrency));
+            _lifterWindow[q] = 1.0f + w;
+            _lifterWindow[_frameSize - q] = _lifterWindow[q];
+        }
+        for (int q = cutoffQuefrency; q <= _frameSize - cutoffQuefrency; q++)
+        {
+            _lifterWindow[q] = 0.0f;
+        }
+
         Reset();
         _isPrepared = true;
     }
@@ -130,10 +174,10 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
         }
 
         int framesToProcess = Math.Min(input.Length, output.Length);
-        double pitchRatio = _stretchRatio; // 2^(semitones / 12)
+        double pitchRatio = _stretchRatio; // 2^(pitchSemitones / 12)
 
-        // Fast-path passthrough when pitch shift is negligible (< 0.01 semitones)
-        if (Math.Abs(_pitchSemitones) < 0.01f)
+        // Fast-path passthrough when both pitch and formant shifts are negligible (< 0.01 semitones)
+        if (Math.Abs(_pitchSemitones) < 0.01f && Math.Abs(_formantSemitones) < 0.01f)
         {
             input[..framesToProcess].CopyTo(output);
             return;
@@ -207,6 +251,9 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
             _magnitude[k] = MathF.Sqrt(r * r + im * im);
             _analysisPhase[k] = MathF.Atan2(im, r);
         }
+
+        // Apply spectral envelope warping for independent formant shift (P3-2)
+        ApplyFormantWarp();
 
         if (!_isPhaseInitialized)
         {
@@ -377,5 +424,83 @@ public sealed class PhaseVocoderProcessor : IAudioProcessor
         // Prime the input buffer with frameSize - analysisHop samples so the first frame
         // processes after exactly one analysisHop has arrived
         _inputWritePos = _frameSize - _analysisHop;
+    }
+
+    /// <summary>
+    /// Performs spectral envelope warping via cepstral liftering to shift formants independently of pitch.
+    /// Strictly zero heap allocations in the audio processing path (Invariant #1).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void ApplyFormantWarp()
+    {
+        double formantRatio = _formantRatio;
+        if (Math.Abs(_formantSemitones) < 0.01f || Math.Abs(formantRatio - 1.0) < 0.001)
+        {
+            return;
+        }
+
+        int halfSize = _frameSize / 2;
+
+        // 1. Symmetric log-magnitude spectrum
+        for (int k = 0; k <= halfSize; k++)
+        {
+            _cepstrumReal[k] = MathF.Log(MathF.Max(_magnitude[k], 1e-6f));
+            _cepstrumImag[k] = 0f;
+        }
+        for (int k = 1; k < halfSize; k++)
+        {
+            _cepstrumReal[_frameSize - k] = _cepstrumReal[k];
+            _cepstrumImag[_frameSize - k] = 0f;
+        }
+
+        // 2. Real cepstrum via inverse FFT
+        _fft.Inverse(_cepstrumReal, _cepstrumImag);
+
+        // 3. Low-quefrency lifter isolates the smooth vocal tract envelope
+        for (int n = 0; n < _frameSize; n++)
+        {
+            _cepstrumReal[n] *= _lifterWindow[n];
+            _cepstrumImag[n] = 0f;
+        }
+
+        // 4. Forward FFT back to log spectral envelope
+        _fft.Forward(_cepstrumReal, _cepstrumImag);
+
+        // 5. Compute smooth spectral envelope E[k] = exp(L_smooth[k])
+        for (int k = 0; k <= halfSize; k++)
+        {
+            _spectralEnvelope[k] = MathF.Exp(_cepstrumReal[k]);
+        }
+
+        // 6. Warp envelope frequency axis: E_warped[k] = E[k / formantRatio] via linear interpolation
+        for (int k = 0; k <= halfSize; k++)
+        {
+            double srcBin = k / formantRatio;
+            if (srcBin <= 0.0)
+            {
+                _warpedEnvelope[k] = _spectralEnvelope[0];
+            }
+            else if (srcBin >= halfSize)
+            {
+                _warpedEnvelope[k] = _spectralEnvelope[halfSize];
+            }
+            else
+            {
+                int i0 = (int)srcBin;
+                int i1 = Math.Min(i0 + 1, halfSize);
+                float frac = (float)(srcBin - i0);
+                _warpedEnvelope[k] = _spectralEnvelope[i0] * (1.0f - frac) + _spectralEnvelope[i1] * frac;
+            }
+        }
+
+        // 7. Recombine: shape magnitude by warped envelope ratio
+        for (int k = 0; k <= halfSize; k++)
+        {
+            float origEnv = _spectralEnvelope[k];
+            if (origEnv > 1e-6f)
+            {
+                _magnitude[k] *= (_warpedEnvelope[k] / origEnv);
+            }
+        }
     }
 }

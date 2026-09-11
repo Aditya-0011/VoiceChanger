@@ -179,6 +179,47 @@ public sealed class PhaseVocoderTests
         Assert.InRange(meanSteadyRms, 0.7071 * 0.90, 0.7071 * 1.10);
     }
 
+    [Fact]
+    public void FormantShift_PreservesFundamentalFrequency()
+    {
+        // Pitch 0 (pitch unchanged), Formant +6 semitones (vocal tract shifted up)
+        var vocoder = new PhaseVocoderProcessor(frameSize: 1024, analysisHop: 256, initialSemitones: 0.0f);
+        vocoder.FormantSemitones = 6.0f;
+        vocoder.Prepare(SampleRate, BlockSize);
+
+        float measuredFreq = MeasureProcessedToneFrequency(vocoder, inputFreq: 440f, durationSec: 1.0f);
+
+        // Fundamental pitch must remain strictly 440 Hz +/- 1%
+        Assert.InRange(measuredFreq, 440f * 0.99f, 440f * 1.01f);
+    }
+
+    [Fact]
+    public void FormantShift_ZeroAllocations_InAudioProcessCallback()
+    {
+        var vocoder = new PhaseVocoderProcessor(frameSize: 1024, analysisHop: 256, initialSemitones: 3.0f);
+        vocoder.FormantSemitones = 5.0f;
+        vocoder.Prepare(SampleRate, BlockSize);
+
+        float[] input = new float[BlockSize];
+        float[] output = new float[BlockSize];
+        for (int i = 0; i < BlockSize; i++) input[i] = 0.1f * MathF.Sin(i);
+
+        // Warmup
+        for (int i = 0; i < 200; i++)
+        {
+            vocoder.Process(input, output);
+        }
+
+        long allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 1000; i++)
+        {
+            vocoder.Process(input, output);
+        }
+        long allocatedAfter = GC.GetAllocatedBytesForCurrentThread();
+
+        Assert.Equal(0, allocatedAfter - allocatedBefore);
+    }
+
     private static float MeasureProcessedToneFrequency(PhaseVocoderProcessor vocoder, float inputFreq, float durationSec)
     {
         int totalFrames = (int)(SampleRate * durationSec);

@@ -6,7 +6,7 @@
 [![WASAPI Audio](https://img.shields.io/badge/Audio-WASAPI%20Shared%20Mode-00A4EF?style=flat)](https://learn.microsoft.com/windows/win32/coreaudio/wasapi)
 [![Latency](https://img.shields.io/badge/Roundtrip%20Latency-51.3%20ms-success?style=flat)]()
 [![Zero Heap Allocations](https://img.shields.io/badge/Audio%20Loop%20GC-0%20bytes-brightgreen?style=flat)]()
-[![Tests](https://img.shields.io/badge/Tests-74%20Passed-brightgreen?style=flat)]()
+[![Tests](https://img.shields.io/badge/Tests-87%20Passed-brightgreen?style=flat)]()
 
 VoiceChanger shifts your voice pitch in real time on Windows 11 using .NET 10 and WinUI 3. It captures audio from your microphone, runs it through a phase vocoder, and sends the output to a virtual audio device like [VB-Audio Virtual Cable](https://vb-audio.com/Cable/). Discord, games, and web browsers can then use that virtual output as their recording input.
 
@@ -95,13 +95,13 @@ flowchart TD
 - [x] ~~Verified 0 bytes allocated in the audio callback loop (`GC.GetAllocatedBytesForCurrentThread() == 0`).~~
 - [x] ~~WinUI 3 interface with pitch slider, bypass toggle, and presets (Octave Down, Deep Voice, Natural, High Pitch, Octave Up).~~
 
-### Phase 3: Formant control and usability *(In progress)*
-- [ ] Spectral envelope extraction and warping via cepstral liftering to change voice character without affecting pitch.
-- [ ] Noise gate with an attack/release envelope follower placed ahead of the vocoder to keep keyboard clicks from pitching up.
-- [ ] Dry/wet mixer to blend unprocessed and pitch-shifted audio.
-- [ ] Preset storage and retrieval using source-generated JSON serialization.
-- [ ] Global hotkeys with Win32 `RegisterHotKey` to switch presets while in-game.
-- [ ] Headphone monitoring through an optional isolated render stream to hear your own voice.
+### ~~Phase 3: Formant control and usability~~ *(Completed)*
+- [x] ~~Spectral envelope extraction and warping via cepstral liftering to change voice character without affecting pitch.~~
+- [x] ~~Noise gate with an attack/release envelope follower placed ahead of the vocoder to keep keyboard clicks from pitching up.~~
+- [x] ~~Dry/wet mixer to blend unprocessed and pitch-shifted audio.~~
+- [x] ~~Preset storage and retrieval using source-generated JSON serialization.~~
+- [x] ~~Global hotkeys with Win32 `RegisterHotKey` to switch presets while in-game.~~
+- [x] ~~Headphone monitoring through an optional isolated render stream to hear your own voice.~~
 
 ### Phase 4: Neural voice conversion *(Planned)*
 - [ ] Chunked streaming with overlapping audio windows and crossfading to eliminate boundary clicks.
@@ -157,6 +157,18 @@ Start the WinUI 3 desktop application:
 
 ```powershell
 dotnet run --project VoiceChanger.App/VoiceChanger.App.csproj
+```
+
+To run with live continuous telemetry logging to both your terminal and `telemetry.log` at the project root, pass the argument using `--args`:
+
+```powershell
+dotnet run --project VoiceChanger.App/VoiceChanger.App.csproj -- --args "telemetry"
+```
+
+Alternatively, enable telemetry via environment variable:
+
+```powershell
+$env:VOICECHANGER_TELEMETRY = "1"; dotnet run --project VoiceChanger.App/VoiceChanger.App.csproj
 ```
 
 ---

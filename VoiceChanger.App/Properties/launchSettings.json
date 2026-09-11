@@ -3,8 +3,16 @@
     "VoiceChanger (Package)": {
       "commandName": "MsixPackage"
     },
+    "VoiceChanger (Package - Telemetry)": {
+      "commandName": "MsixPackage",
+      "commandLineArgs": "--telemetry"
+    },
     "VoiceChanger (Unpackaged)": {
       "commandName": "Project"
+    },
+    "VoiceChanger (Unpackaged - Telemetry)": {
+      "commandName": "Project",
+      "commandLineArgs": "--telemetry"
     }
   }
 }
