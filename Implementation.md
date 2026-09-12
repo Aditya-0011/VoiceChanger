@@ -73,7 +73,7 @@ Any DSP or interop code (Phase 0+) · CI · README.
 | Phase 1 | SPSC ring buffer + worker + clock drift | Complete (acceptance met) | [2026-09-06 19:05] |
 | Phase 2 | Phase vocoder DSP tier | Complete (acceptance met) | [2026-09-06 20:50] |
 | Phase 3 | Formant control + usability | Complete (acceptance met) | [2026-09-11 17:15] |
-| Phase 4 | Neural tier (ONNX/DirectML) | Not started | — |
+| Phase 4 | Neural tier (ONNX/DirectML) | Complete (acceptance met) | [2026-09-11 18:45] |
 | Phase 5 | Optimization + measurement | Not started | — |
 
 Statuses: **Not started · In progress · Complete (acceptance met) · Blocked (see Summary.md)**. A phase may only enter "Complete" when its acceptance criteria (Appendix C) are verified and logged.

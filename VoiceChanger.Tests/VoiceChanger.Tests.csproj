@@ -22,6 +22,7 @@
   <ItemGroup>
     <ProjectReference Include="..\VoiceChanger.Core\VoiceChanger.Core.csproj" />
     <ProjectReference Include="..\VoiceChanger.Audio\VoiceChanger.Audio.csproj" />
+    <ProjectReference Include="..\VoiceChanger.Neural\VoiceChanger.Neural.csproj" />
   </ItemGroup>
 
 </Project>

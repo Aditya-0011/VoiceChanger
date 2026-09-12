@@ -34,7 +34,9 @@ public partial class App : Application
         {
             try
             {
-                System.IO.File.WriteAllText(@"crash.txt", $"UnhandledException: {e.Message}\n{e.Exception}\nStackTrace:\n{e.Exception.StackTrace}");
+                string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceChanger");
+                System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "crash.txt"), $"UnhandledException: {e.Message}\n{e.Exception}\nStackTrace:\n{e.Exception?.StackTrace}");
             }
             catch { }
         };
@@ -43,7 +45,9 @@ public partial class App : Application
         {
             try
             {
-                System.IO.File.WriteAllText(@"crash.txt", $"AppDomain UnhandledException: {e.ExceptionObject}");
+                string dir = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceChanger");
+                System.IO.Directory.CreateDirectory(dir);
+                System.IO.File.WriteAllText(System.IO.Path.Combine(dir, "crash.txt"), $"AppDomain UnhandledException: {e.ExceptionObject}");
             }
             catch { }
         };

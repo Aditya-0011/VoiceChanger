@@ -13,8 +13,8 @@
 
             <!-- Header -->
             <StackPanel Spacing="4">
-                <TextBlock Text="VoiceChanger: Real-Time Audio DSP (Phase 3)" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="SemiBold" />
-                <TextBlock Text="Zero-allocation phase vocoder with independent formant warping, noise gating, presets, and global in-game hotkeys."
+                <TextBlock Text="VoiceChanger: Real-Time Audio DSP &amp; Neural RVC (Phase 4)" Style="{ThemeResource TitleTextBlockStyle}" FontWeight="SemiBold" />
+                <TextBlock Text="Dual-tier architecture: zero-allocation CPU phase vocoder (&lt; 30 ms) and neural RVC streaming via ONNX Runtime &amp; DirectML (&lt; 300 ms)."
                            Style="{ThemeResource BodyTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
             </StackPanel>
 
@@ -45,6 +45,28 @@
                         <TextBlock x:Name="StatusText" Text="Stopped" FontWeight="SemiBold" />
                     </StackPanel>
                 </Grid>
+            </Border>
+
+            <!-- Processing Tier Architecture Selection Card (Phase 4) -->
+            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="12">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Processing Tier Architecture" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="Choose between fast CPU phase vocoder DSP (&lt; 30 ms budget) and neural RVC voice conversion (&lt; 300 ms budget with DirectML GPU acceleration)."
+                                   Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <StackPanel Orientation="Horizontal" Spacing="24">
+                        <RadioButton x:Name="TierDspRadio" Content="DSP Phase Vocoder Tier (Fast, &lt; 30 ms)"
+                                     IsChecked="True" Checked="OnTierSelectionChanged" />
+                        <RadioButton x:Name="TierNeuralRadio" Content="Neural RVC Tier (DirectML / ONNX, &lt; 300 ms)"
+                                     IsChecked="False" Checked="OnTierSelectionChanged" />
+                    </StackPanel>
+                </StackPanel>
             </Border>
 
             <!-- Device Selection & Monitoring Card -->
@@ -102,7 +124,8 @@
             </Border>
 
             <!-- Presets & Global Hotkeys Card (P3-4, P3-5, P3-6) -->
-            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            <Border x:Name="PresetCard"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
                     CornerRadius="8"
@@ -156,8 +179,125 @@
                 </StackPanel>
             </Border>
 
+            <!-- Neural Voice Conversion Card (Phase 4: ONNX Runtime & DirectML) -->
+            <Border x:Name="NeuralCard"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20"
+                    Visibility="Collapsed">
+                <StackPanel Spacing="16">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Neural Voice Conversion (RVC via ONNX Runtime &amp; DirectML)" Style="{ThemeResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="Real-time sliding window inference with half-Hann crossfading. DirectML hardware acceleration utilizes your GPU (RTX 4060 or Arc iGPU)."
+                                   Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <!-- Models Directory Location -->
+                    <StackPanel Spacing="6">
+                        <Grid>
+                            <TextBlock Text="Models Location (%APPDATA% default, custom location supported)" FontWeight="Medium" HorizontalAlignment="Left" />
+                            <HyperlinkButton Content="Reset to Default (%APPDATA%)" Click="OnResetModelsDirectoryClicked"
+                                             HorizontalAlignment="Right" Padding="4,0" />
+                        </Grid>
+                        <Grid ColumnSpacing="8">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBox x:Name="ModelsDirectoryTextBox" Grid.Column="0"
+                                     PlaceholderText="%APPDATA%\VoiceChanger\models" VerticalAlignment="Center"
+                                     KeyDown="OnModelsDirectoryKeyDown" LostFocus="OnModelsDirectoryLostFocus" />
+                            <Button Grid.Column="1" Content="Change Folder..." Click="OnChangeModelsFolderClicked" />
+                            <Button Grid.Column="2" Content="Open Folder" Click="OnOpenModelsFolderClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <!-- Voice Model Selection & Actions -->
+                    <StackPanel Spacing="6">
+                        <TextBlock Text="Active Voice Model" FontWeight="Medium" />
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="VoiceModelCombo" Grid.Column="0" HorizontalAlignment="Stretch"
+                                      DisplayMemberPath="Name" SelectionChanged="OnVoiceModelSelectionChanged" />
+                            <Button Grid.Column="1" Content="Refresh Voices" Click="OnRefreshVoicesClicked" />
+                        </Grid>
+                    </StackPanel>
+
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Execution Provider Selection -->
+                        <StackPanel Grid.Column="0" Spacing="6">
+                            <TextBlock Text="Inference Provider" FontWeight="Medium" />
+                            <ComboBox x:Name="NeuralProviderCombo" HorizontalAlignment="Stretch" SelectedIndex="0"
+                                      SelectionChanged="OnNeuralProviderChanged">
+                                <ComboBoxItem Content="DirectML (DirectX 12 GPU)" />
+                                <ComboBoxItem Content="CPU Execution Provider" />
+                            </ComboBox>
+                        </StackPanel>
+
+                        <!-- Pitch Shift for Neural -->
+                        <StackPanel Grid.Column="1" Spacing="6">
+                            <Grid>
+                                <TextBlock Text="F0 Pitch Offset (Semitones)" FontWeight="Medium" HorizontalAlignment="Left" />
+                                <TextBlock x:Name="NeuralPitchValueText" Text="0.0 st" FontWeight="SemiBold"
+                                           Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" HorizontalAlignment="Right" />
+                            </Grid>
+                            <Slider x:Name="NeuralPitchSlider" Minimum="-12" Maximum="12" StepFrequency="1" Value="0"
+                                    ValueChanged="OnNeuralPitchSliderChanged" />
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Streaming Window & Overlap (Latency vs Quality Knob) -->
+                    <Grid ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+
+                        <StackPanel Grid.Column="0" Spacing="6">
+                            <Grid>
+                                <TextBlock Text="Inference Window (Latency Floor)" FontWeight="Medium" HorizontalAlignment="Left" />
+                                <TextBlock x:Name="NeuralWindowText" Text="300 ms" FontWeight="SemiBold" HorizontalAlignment="Right" />
+                            </Grid>
+                            <Slider x:Name="NeuralWindowSlider" Minimum="150" Maximum="450" StepFrequency="25" Value="300"
+                                    ValueChanged="OnNeuralWindowSliderChanged" />
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1" Spacing="6">
+                            <Grid>
+                                <TextBlock Text="Crossfade Overlap (Boundary Smoothing)" FontWeight="Medium" HorizontalAlignment="Left" />
+                                <TextBlock x:Name="NeuralOverlapText" Text="50 ms" FontWeight="SemiBold" HorizontalAlignment="Right" />
+                            </Grid>
+                            <Slider x:Name="NeuralOverlapSlider" Minimum="20" Maximum="100" StepFrequency="10" Value="50"
+                                    ValueChanged="OnNeuralOverlapSliderChanged" />
+                        </StackPanel>
+                    </Grid>
+
+                    <!-- Neural Model Status Info -->
+                    <Border Background="{ThemeResource LayerFillColorDefaultBrush}" CornerRadius="6" Padding="12">
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="Neural Tier Status" Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                            <TextBlock x:Name="NeuralStatusText" Text="Ready (Pass-through mode / awaiting user models)" FontWeight="SemiBold" />
+                            <TextBlock x:Name="NeuralModelHelpText" Text="Place exported ONNX models into the models folder above."
+                                       Style="{ThemeResource CaptionTextBlockStyle}" Foreground="{ThemeResource TextFillColorTertiaryBrush}" />
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Border>
+
             <!-- Voice Transformation Card (Phase 2 Pitch + Phase 3 Formants) -->
-            <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+            <Border x:Name="DspCard"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
                     BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                     BorderThickness="1"
                     CornerRadius="8"

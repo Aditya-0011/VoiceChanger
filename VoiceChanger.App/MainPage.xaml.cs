@@ -1,16 +1,19 @@
+using System.Diagnostics;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using VoiceChanger.App.Services;
 using VoiceChanger.Audio;
 using VoiceChanger.Audio.Devices;
 using VoiceChanger.Audio.Telemetry;
 using VoiceChanger.Core.Dsp;
 using VoiceChanger.Core.Presets;
+using VoiceChanger.Neural;
 
 namespace VoiceChanger.App;
 
 /// <summary>
-/// Voice transformation, presets, and diagnostics page (Phase 3).
+/// Voice transformation, presets, and diagnostics page (Phase 4: DSP &amp; Neural Tiers).
 /// </summary>
 public sealed partial class MainPage : Page
 {
@@ -20,12 +23,18 @@ public sealed partial class MainPage : Page
     private readonly TelemetryLogger _telemetryLogger;
     private readonly DispatcherTimer _diagTimer;
     private HotkeyService? _hotkeyService;
+    private RvcProcessor? _rvcProcessor;
+    private readonly AppSettings _appSettings;
+    private readonly VoiceCatalog _voiceCatalog;
+    private bool _isNeuralTierActive;
     private bool _isUpdatingUi;
 
     public MainPage()
     {
         try
         {
+            _appSettings = AppSettingsService.Load();
+            _voiceCatalog = new VoiceCatalog(_appSettings.CustomModelsDirectory);
             _chain = new ProcessorChain(new DspParameters());
             _engine = new AudioEngine(_chain);
             _presetManager = new PresetManager();
@@ -46,7 +55,9 @@ public sealed partial class MainPage : Page
         {
             try
             {
-                File.WriteAllText(@"crash.txt", $"MainPage Constructor Exception: {ex.Message}\n{ex}\n{ex.StackTrace}");
+                string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "VoiceChanger");
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(Path.Combine(dir, "crash.txt"), $"MainPage Constructor Exception: {ex.Message}\n{ex}\n{ex.StackTrace}");
             }
             catch { }
             throw;
@@ -58,7 +69,13 @@ public sealed partial class MainPage : Page
         WarmupDsp();
         RefreshDevices();
         LoadPresetsUi();
+        RefreshVoiceModels();
         InitializeHotkeys();
+
+        if (ModelsDirectoryTextBox != null)
+        {
+            ModelsDirectoryTextBox.Text = _voiceCatalog.ModelsDirectory;
+        }
 
         if (LogPathText != null)
         {
@@ -77,6 +94,9 @@ public sealed partial class MainPage : Page
     {
         _hotkeyService?.Dispose();
         _hotkeyService = null;
+
+        _rvcProcessor?.Dispose();
+        _rvcProcessor = null;
 
         _telemetryLogger?.Dispose();
 
@@ -496,13 +516,19 @@ public sealed partial class MainPage : Page
         var drift = _engine.DriftController;
         var pipeline = _engine.Pipeline;
 
-        if (_engine.ProcessingLatency is { } procLatency)
+        var procLatency = _isNeuralTierActive && _rvcProcessor != null
+            ? _rvcProcessor.GetLatencyDistribution()
+            : _engine.ProcessingLatency;
+
+        if (procLatency != null)
         {
             LatencyP50Text.Text = $"{procLatency.P50Ms:F2} ms";
             LatencyP95Text.Text = $"{procLatency.P95Ms:F2} ms";
             LatencyP99Text.Text = $"{procLatency.P99Ms:F2} ms";
             LatencyMaxText.Text = $"{procLatency.MaxMs:F2} ms";
-            LatencyDetailsText.Text = $"{procLatency.Configuration} (Over {procLatency.SampleCount} chunks)";
+            LatencyDetailsText.Text = _isNeuralTierActive
+                ? $"Neural RVC Inference ({_rvcProcessor?.Config.ProviderType}, Window {_rvcProcessor?.Streamer.WindowFrames}f)"
+                : $"{procLatency.Configuration} (Over {procLatency.SampleCount} chunks)";
         }
 
         double fillPct = drift.FillPercentage;
@@ -516,8 +542,22 @@ public sealed partial class MainPage : Page
         // Write live telemetry and parameter snapshot to root telemetry.log
         if (_telemetryLogger.IsEnabled)
         {
+            var loggedParams = _isNeuralTierActive
+                ? new DspParameters
+                {
+                    PitchSemitones = (float)(NeuralPitchSlider?.Value ?? 0.0),
+                    FormantSemitones = 0.0f,
+                    VocoderEnabled = true,
+                    NoiseGateEnabled = GateToggle?.IsOn ?? true,
+                    NoiseGateThresholdDb = (float)(GateThresholdSlider?.Value ?? -45.0),
+                    NoiseGateAttackMs = (float)(GateAttackSlider?.Value ?? 5.0),
+                    NoiseGateReleaseMs = (float)(GateReleaseSlider?.Value ?? 80.0),
+                    DryWetMix = 1.0f
+                }
+                : _chain.Parameters;
+
             _telemetryLogger.LogSnapshot(
-                _engine.ProcessingLatency,
+                procLatency,
                 fillPct,
                 drift.FillMs,
                 drift.DriftRateSamplesPerSec,
@@ -525,8 +565,8 @@ public sealed partial class MainPage : Page
                 drift.DuplicatedSampleCount,
                 pipeline.OverrunFrames,
                 pipeline.UnderrunFrames,
-                (PresetCombo?.SelectedItem as Preset)?.Name,
-                _chain.Parameters,
+                _isNeuralTierActive ? (_rvcProcessor?.ModelSet.ActiveVoice?.Name ?? "Neural Default") : (PresetCombo?.SelectedItem as Preset)?.Name,
+                loggedParams,
                 (InputDeviceCombo?.SelectedItem as AudioDeviceInfo)?.Name,
                 (OutputDeviceCombo?.SelectedItem as AudioDeviceInfo)?.Name,
                 _engine.IsMonitoring,
@@ -607,6 +647,299 @@ public sealed partial class MainPage : Page
             StatusText.Text = "Stopped";
             ResetDiagnosticsUi();
         });
+    }
+
+    private void RefreshVoiceModels()
+    {
+        try
+        {
+            var voices = _voiceCatalog.GetAvailableVoices();
+            VoiceModelCombo.ItemsSource = voices;
+            if (voices.Count > 0)
+            {
+                VoiceModelCombo.SelectedIndex = 0;
+            }
+            else
+            {
+                VoiceModelCombo.SelectedIndex = -1;
+                NeuralStatusText.Text = $"No user voice models found in {_voiceCatalog.ModelsDirectory} (Running in synthetic pass-through timbre mode)";
+            }
+
+            if (NeuralModelHelpText != null)
+            {
+                NeuralModelHelpText.Text = $"Place exported ONNX models into: {_voiceCatalog.ModelsDirectory}";
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowAlert($"Failed to refresh voice models: {ex.Message}", InfoBarSeverity.Warning);
+        }
+    }
+
+    private RvcProcessor GetOrCreateRvcProcessor()
+    {
+        if (_rvcProcessor == null)
+        {
+            var config = new ExecutionProviderConfig
+            {
+                ProviderType = NeuralProviderCombo?.SelectedIndex == 1 ? ExecutionProviderType.Cpu : ExecutionProviderType.DirectML
+            };
+            _rvcProcessor = new RvcProcessor(config: config);
+
+            // Load shared base models (ContentVec/HuBERT and RMVPE) if discovered
+            string? encoderPath = _voiceCatalog.ContentVecModelPath;
+            string? f0Path = _voiceCatalog.RmvpeModelPath;
+            if (!string.IsNullOrEmpty(encoderPath) || !string.IsNullOrEmpty(f0Path))
+            {
+                try
+                {
+                    _rvcProcessor.ModelSet.LoadSharedSessions(encoderPath, f0Path);
+                }
+                catch { }
+            }
+
+            _rvcProcessor.Prepare(48000, 256);
+            _rvcProcessor.WarmUp(passes: 5);
+        }
+        return _rvcProcessor;
+    }
+
+    private void OnTierSelectionChanged(object sender, RoutedEventArgs e)
+    {
+        if (TierNeuralRadio?.IsChecked == true)
+        {
+            try
+            {
+                var rvc = GetOrCreateRvcProcessor();
+                _isNeuralTierActive = true;
+                _engine.SetProcessor(rvc);
+
+                // Apply current parameters (NoiseGate threshold/attack/release, etc.) to the neural processor
+                var currentParams = new DspParameters
+                {
+                    PitchSemitones = (float)(NeuralPitchSlider?.Value ?? 0.0),
+                    FormantSemitones = (float)(FormantSlider?.Value ?? 0.0),
+                    VocoderEnabled = VocoderToggle?.IsOn ?? true,
+                    NoiseGateEnabled = GateToggle?.IsOn ?? true,
+                    NoiseGateThresholdDb = (float)(GateThresholdSlider?.Value ?? -45.0),
+                    NoiseGateAttackMs = (float)(GateAttackSlider?.Value ?? 5.0),
+                    NoiseGateReleaseMs = (float)(GateReleaseSlider?.Value ?? 80.0),
+                    DryWetMix = (float)((DryWetSlider?.Value ?? 100.0) / 100.0)
+                };
+                _engine.ApplyParameters(currentParams);
+
+                if (NeuralCard != null) NeuralCard.Visibility = Visibility.Visible;
+                if (DspCard != null) DspCard.Visibility = Visibility.Collapsed;
+                if (PresetCard != null) PresetCard.Visibility = Visibility.Collapsed;
+
+                if (VoiceModelCombo?.SelectedItem is VoiceModelInfo selectedVoice)
+                {
+                    rvc.SetVoice(selectedVoice);
+                    NeuralStatusText.Text = $"Active Voice: {selectedVoice.Name} ({selectedVoice.TargetSampleRate} Hz)";
+                }
+                else
+                {
+                    NeuralStatusText.Text = "Active: Neural Tier (Synthetic pass-through mode / awaiting user models)";
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowAlert($"Failed to initialize Neural tier: {ex.Message}. Falling back to DSP Phase Vocoder.", InfoBarSeverity.Error);
+                if (TierDspRadio != null) TierDspRadio.IsChecked = true;
+                _isNeuralTierActive = false;
+                _engine.SetProcessor(_chain);
+            }
+        }
+        else
+        {
+            _isNeuralTierActive = false;
+            _engine.SetProcessor(_chain);
+
+            if (NeuralCard != null) NeuralCard.Visibility = Visibility.Collapsed;
+            if (DspCard != null) DspCard.Visibility = Visibility.Visible;
+            if (PresetCard != null) PresetCard.Visibility = Visibility.Visible;
+        }
+    }
+
+    private void OnRefreshVoicesClicked(object sender, RoutedEventArgs e)
+    {
+        RefreshVoiceModels();
+    }
+
+    private async void OnChangeModelsFolderClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var folderPicker = new Windows.Storage.Pickers.FolderPicker();
+            folderPicker.SuggestedStartLocation = Windows.Storage.Pickers.PickerLocationId.ComputerFolder;
+            folderPicker.FileTypeFilter.Add("*");
+
+            var window = App.MainWindowInstance;
+            if (window != null)
+            {
+                IntPtr hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
+                WinRT.Interop.InitializeWithWindow.Initialize(folderPicker, hwnd);
+            }
+
+            var folder = await folderPicker.PickSingleFolderAsync();
+            if (folder != null && !string.IsNullOrWhiteSpace(folder.Path))
+            {
+                ApplyNewModelsDirectory(folder.Path);
+            }
+        }
+        catch (Exception ex)
+        {
+            ShowAlert($"Could not open folder picker: {ex.Message}", InfoBarSeverity.Warning);
+        }
+    }
+
+    private void OnResetModelsDirectoryClicked(object sender, RoutedEventArgs e)
+    {
+        ApplyNewModelsDirectory(null);
+    }
+
+    private void OnModelsDirectoryKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            ApplyNewModelsDirectory(ModelsDirectoryTextBox?.Text);
+            e.Handled = true;
+        }
+    }
+
+    private void OnModelsDirectoryLostFocus(object sender, RoutedEventArgs e)
+    {
+        if (ModelsDirectoryTextBox != null &&
+            !string.Equals(ModelsDirectoryTextBox.Text.Trim(), _voiceCatalog.ModelsDirectory, StringComparison.OrdinalIgnoreCase))
+        {
+            ApplyNewModelsDirectory(ModelsDirectoryTextBox.Text);
+        }
+    }
+
+    private void ApplyNewModelsDirectory(string? path)
+    {
+        try
+        {
+            _voiceCatalog.SetModelsDirectory(path);
+            if (ModelsDirectoryTextBox != null)
+            {
+                ModelsDirectoryTextBox.Text = _voiceCatalog.ModelsDirectory;
+            }
+
+            // Persist setting
+            _appSettings.CustomModelsDirectory = string.Equals(_voiceCatalog.ModelsDirectory, VoiceCatalog.DefaultModelsDirectory, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : _voiceCatalog.ModelsDirectory;
+            AppSettingsService.Save(_appSettings);
+
+            // Update shared base sessions if processor is active
+            if (_rvcProcessor != null)
+            {
+                try
+                {
+                    _rvcProcessor.ModelSet.LoadSharedSessions(_voiceCatalog.ContentVecModelPath, _voiceCatalog.RmvpeModelPath);
+                }
+                catch { }
+            }
+
+            // Refresh voices from new directory
+            RefreshVoiceModels();
+            ShowAlert($"Models location updated: {_voiceCatalog.ModelsDirectory}", InfoBarSeverity.Informational);
+        }
+        catch (Exception ex)
+        {
+            ShowAlert($"Failed to set models directory: {ex.Message}", InfoBarSeverity.Error);
+        }
+    }
+
+    private void OnOpenModelsFolderClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _voiceCatalog.EnsureDirectoryExists();
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = _voiceCatalog.ModelsDirectory,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            ShowAlert($"Failed to open models folder: {ex.Message}", InfoBarSeverity.Warning);
+        }
+    }
+
+    private void OnVoiceModelSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (VoiceModelCombo?.SelectedItem is VoiceModelInfo voice)
+        {
+            try
+            {
+                if (_rvcProcessor != null)
+                {
+                    _rvcProcessor.SetVoice(voice);
+                }
+                NeuralStatusText.Text = $"Active Voice: {voice.Name} ({voice.TargetSampleRate} Hz)";
+            }
+            catch (Exception ex)
+            {
+                ShowAlert($"Failed to load voice model '{voice.Name}': {ex.Message}", InfoBarSeverity.Error);
+            }
+        }
+    }
+
+    private void OnNeuralProviderChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_rvcProcessor != null && NeuralProviderCombo != null)
+        {
+            _rvcProcessor.Config.ProviderType = NeuralProviderCombo.SelectedIndex == 1
+                ? ExecutionProviderType.Cpu
+                : ExecutionProviderType.DirectML;
+        }
+    }
+
+    private void OnNeuralPitchSliderChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (NeuralPitchValueText != null && NeuralPitchSlider != null)
+        {
+            NeuralPitchValueText.Text = $"{NeuralPitchSlider.Value:+0.0;-0.0;0.0} st";
+            if (_rvcProcessor != null)
+            {
+                _rvcProcessor.PitchShiftSemitones = (float)NeuralPitchSlider.Value;
+            }
+
+            if (_isNeuralTierActive)
+            {
+                var parameters = new DspParameters
+                {
+                    PitchSemitones = (float)NeuralPitchSlider.Value,
+                    FormantSemitones = (float)(FormantSlider?.Value ?? 0.0),
+                    VocoderEnabled = VocoderToggle?.IsOn ?? true,
+                    NoiseGateEnabled = GateToggle?.IsOn ?? true,
+                    NoiseGateThresholdDb = (float)(GateThresholdSlider?.Value ?? -45.0),
+                    NoiseGateAttackMs = (float)(GateAttackSlider?.Value ?? 5.0),
+                    NoiseGateReleaseMs = (float)(GateReleaseSlider?.Value ?? 80.0),
+                    DryWetMix = (float)((DryWetSlider?.Value ?? 100.0) / 100.0)
+                };
+                _engine.ApplyParameters(parameters);
+            }
+        }
+    }
+
+    private void OnNeuralWindowSliderChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (NeuralWindowText != null && NeuralWindowSlider != null)
+        {
+            NeuralWindowText.Text = $"{NeuralWindowSlider.Value:F0} ms";
+        }
+    }
+
+    private void OnNeuralOverlapSliderChanged(object sender, Microsoft.UI.Xaml.Controls.Primitives.RangeBaseValueChangedEventArgs e)
+    {
+        if (NeuralOverlapText != null && NeuralOverlapSlider != null)
+        {
+            NeuralOverlapText.Text = $"{NeuralOverlapSlider.Value:F0} ms";
+        }
     }
 
     private void ShowAlert(string message, InfoBarSeverity severity)

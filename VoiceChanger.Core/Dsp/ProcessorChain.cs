@@ -9,7 +9,7 @@ namespace VoiceChanger.Core.Dsp;
 /// Strictly zero heap allocations in the audio callback path (Invariant #1).
 /// Pure managed C# with zero external dependencies (Invariant #3).
 /// </summary>
-public sealed class ProcessorChain : IAudioProcessor
+public sealed class ProcessorChain : IAudioProcessor, IParameterReceiver
 {
     private readonly NoiseGate _noiseGate;
     private readonly PhaseVocoderProcessor _vocoder;
@@ -35,6 +35,12 @@ public sealed class ProcessorChain : IAudioProcessor
             ArgumentNullException.ThrowIfNull(value);
             Volatile.Write(ref _parameters, value);
         }
+    }
+
+    /// <inheritdoc/>
+    public void ApplyParameters(DspParameters parameters)
+    {
+        Parameters = parameters;
     }
 
     /// <summary>

@@ -30,3 +30,15 @@ public interface IAudioProcessor
     /// </summary>
     void Reset();
 }
+
+/// <summary>
+/// Optional interface for audio processors that accept runtime DSP parameter snapshots.
+/// </summary>
+public interface IParameterReceiver
+{
+    /// <summary>
+    /// Applies a runtime snapshot of DSP parameters atomically without restarting audio streams.
+    /// </summary>
+    /// <param name="parameters">The parameter snapshot.</param>
+    void ApplyParameters(Dsp.DspParameters parameters);
+}

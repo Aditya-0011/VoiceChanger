@@ -19,6 +19,7 @@ public sealed class AudioEngine : IDisposable
     private WasapiRenderStream? _renderStream;
     private WasapiRenderStream? _monitorStream;
     private IAudioProcessor _processor;
+    private Core.Dsp.DspParameters? _lastParameters;
     private bool _isRunning;
     private bool _disposed;
 
@@ -138,6 +139,11 @@ public sealed class AudioEngine : IDisposable
                 _captureStream.Start();
                 _renderStream.Start();
 
+                if (_lastParameters != null && _processor is Core.IParameterReceiver startReceiver)
+                {
+                    startReceiver.ApplyParameters(_lastParameters);
+                }
+
                 _isRunning = true;
                 StatusChanged?.Invoke("Running");
             }
@@ -232,6 +238,11 @@ public sealed class AudioEngine : IDisposable
         Volatile.Write(ref _processor, newProcessor);
         _pipeline.Processor = newProcessor;
 
+        if (_lastParameters != null && newProcessor is Core.IParameterReceiver receiver)
+        {
+            receiver.ApplyParameters(_lastParameters);
+        }
+
         if (_isRunning && _captureStream != null && _renderStream != null)
         {
             StartupLatency = MeasureStartupLatency(_captureStream, _renderStream, newProcessor);
@@ -309,9 +320,10 @@ public sealed class AudioEngine : IDisposable
     public void ApplyParameters(Core.Dsp.DspParameters parameters)
     {
         ArgumentNullException.ThrowIfNull(parameters);
-        if (_processor is Core.Dsp.ProcessorChain chain)
+        _lastParameters = parameters;
+        if (_processor is Core.IParameterReceiver receiver)
         {
-            chain.Parameters = parameters;
+            receiver.ApplyParameters(parameters);
         }
         else if (_processor is Core.Dsp.PhaseVocoderProcessor vocoder)
         {

@@ -1,5 +1,6 @@
 using VoiceChanger.Audio;
 using VoiceChanger.Audio.Telemetry;
+using VoiceChanger.Core;
 using VoiceChanger.Core.Dsp;
 using Xunit;
 

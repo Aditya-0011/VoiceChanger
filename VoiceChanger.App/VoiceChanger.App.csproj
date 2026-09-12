@@ -80,4 +80,17 @@
     <PublishReadyToRun Condition="'$(Configuration)' != 'Debug'">True</PublishReadyToRun>
     <PublishTrimmed>False</PublishTrimmed>
   </PropertyGroup>
+
+  <!-- Deduplicate onnxruntime.dll between WindowsAppSDK/WinML and Microsoft.ML.OnnxRuntime.DirectML -->
+  <Target Name="RemoveDuplicateWinMLOnnxRuntime" BeforeTargets="_ComputeAppxPackagePayload">
+    <ItemGroup>
+      <PackagingOutputs Remove="@(PackagingOutputs)"
+        Condition="'%(FileName)%(Extension)' == 'onnxruntime.dll' and $([System.String]::Copy('%(FullPath)').Contains('microsoft.windows.ai.machinelearning'))" />
+    </ItemGroup>
+  </Target>
+
+  <!-- Automatically terminate previous VoiceChanger.exe instance before build/run to prevent file locking sharing violations -->
+  <Target Name="KillRunningAppBeforeBuild" BeforeTargets="BeforeBuild">
+    <Exec Command="taskkill /f /im VoiceChanger.exe 2&gt;nul || exit 0" IgnoreExitCode="true" />
+  </Target>
 </Project>
